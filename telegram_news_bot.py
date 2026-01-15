@@ -183,16 +183,82 @@ Yêu cầu:
     except Exception as e:
         print(f"⚠️ Failed to call Gemini API: {e}")
         return None
+def summarize_with_gemini(article: Article, api_key: str) -> str | None:
+    """
+    Dùng Gemini 2.5 Pro để tóm tắt bài báo.
+    Trả về None nếu lỗi hoặc không có API key.
+    """
+    if not api_key:
+        return None
+    
+    # Chuẩn bị prompt với thông tin từ RSS
+    prompt = f"""Bạn là một AI chuyên tóm tắt tin tức tiếng Việt. 
+Hãy tóm tắt ngắn gọn bài báo sau đây trong 2-3 câu, tập trung vào thông tin quan trọng nhất.
 
+Tiêu đề: {article.title}
+
+Nội dung từ RSS: {article.summary if article.summary else "Không có nội dung chi tiết"}
+
+Yêu cầu:
+- Tóm tắt ngắn gọn, súc tích (2-3 câu, khoảng 100-200 từ)
+- Giữ nguyên thông tin quan trọng và sự kiện chính
+- Viết bằng tiếng Việt
+- Không thêm ý kiến cá nhân hoặc thông tin không có trong bài
+- Loại bỏ các từ ngữ không cần thiết
+"""
+
+    # Sử dụng Gemini 2.0 Flash (hoặc gemini-2.5-pro khi có sẵn)
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 250,
+        }
+    }
+    
+    try:
+        r = requests.post(
+            url,
+            params={"key": api_key},
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if r.status_code != 200:
+            # 429 = quota exceeded, không cần log lỗi
+            if r.status_code == 429:
+                return None
+            print(f"⚠️ Gemini API error {r.status_code}: {r.text[:200]}")
+            return None
+        
+        data = r.json()
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+            texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+            summary = "".join(texts).strip()
+            return summary if summary else None
+        except (KeyError, IndexError, TypeError):
+            return None
+            
+    except Exception as e:
+        print(f"⚠️ Failed to call Gemini API: {e}")
+        return None
 
 def format_article_caption(article: Article, index: int, ai_summary: str | None = None) -> str:
-    """Format caption cho một bài báo (ưu tiên AI summary nếu có)."""
+    """Format caption cho một bài báo (ưu tiên AI summary nếu có, fallback về RSS summary)."""
     title = article.title or "(Không có tiêu đề)"
     caption = f"<b>{index}. {title}</b>"
     
     # Ưu tiên dùng AI summary nếu có
     if ai_summary:
-        caption += f"\n\n🤖 <i>Tóm tắt AI:</i>\n{ai_summary}"
+        caption += f"\n\n{ai_summary}"
     elif article.summary:
         # Fallback về summary từ RSS
         caption += f"\n\n{article.summary}"
@@ -264,7 +330,7 @@ def main() -> int:
     
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    gemini_api_key = os.getenv("GEMINI_API_KEY")  # Thêm dòng này
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
 
     if not token or not chat_id:
         # ... (phần preview như cũ) ...
@@ -297,17 +363,34 @@ def main() -> int:
                 send_telegram_message(token=token, chat_id=chat_id, text=topic_header)
 
                 # Gửi từng tin
+                                # Gửi từng tin
                 for i, article in enumerate(articles, start=1):
                     try:
                         # Tóm tắt bằng AI nếu có API key
                         ai_summary = None
                         if gemini_api_key:
-                            print(f"🤖 Đang tóm tắt bài {i} bằng Gemini...")
+                            print(f"🤖 Đang tóm tắt bài {i} ({topic_name}) bằng Gemini...")
                             ai_summary = summarize_with_gemini(article, gemini_api_key)
                             if ai_summary:
                                 print(f"✅ Đã tóm tắt bài {i}")
                             else:
                                 print(f"⚠️ Không thể tóm tắt bài {i}, dùng summary RSS")
+                        
+                        # Format caption với AI summary hoặc RSS summary
+                        caption = format_article_caption(article, i, ai_summary)
+                        
+                        if article.image_url:
+                            send_telegram_photo(
+                                token=token,
+                                chat_id=chat_id,
+                                photo_url=article.image_url,
+                                caption=caption,
+                            )
+                        else:
+                            send_telegram_message(token=token, chat_id=chat_id, text=caption)
+                        sent_total += 1
+                    except Exception as e:
+                        print(f"⚠️ Failed to send article: {e}")
                         
                         # Format caption với AI summary
                         caption = format_article_caption(article, i, ai_summary)
@@ -343,6 +426,24 @@ def main() -> int:
                         ai_summary = summarize_with_gemini(article, gemini_api_key)
                         if ai_summary:
                             print(f"✅ Đã tóm tắt bài thế giới {i}")
+                        else:
+                            print(f"⚠️ Không thể tóm tắt bài {i}, dùng summary RSS")
+                    
+                    # Format caption với AI summary hoặc RSS summary
+                    caption = format_article_caption(article, i, ai_summary)
+                    
+                    if article.image_url:
+                        send_telegram_photo(
+                            token=token,
+                            chat_id=chat_id,
+                            photo_url=article.image_url,
+                            caption=caption,
+                        )
+                    else:
+                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
+                    sent_total += 1
+                except Exception as e:
+                    print(f"⚠️ Failed to send world article: {e}")
                     
                     # Format caption với AI summary
                     caption = format_article_caption(article, i, ai_summary)
