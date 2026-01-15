@@ -350,34 +350,25 @@ def main() -> int:
             send_telegram_message(token=token, chat_id=chat_id, text=topic_header)
 
             # Gửi từng tin
-            for i, article in enumerate(world_articles, start=1):
-                ai_summary = None
-                if gemini_api_key:
-                    ai_summary = summarize_with_gemini(article, gemini_api_key)
-
-                caption = format_article_caption(article, i, ai_summary)
-
+            for i, article in enumerate(articles, start=1):
                 try:
+                    ai_summary = None
+                    if gemini_api_key:
+                        ai_summary = summarize_with_gemini(article, gemini_api_key)
+
+                    caption = format_article_caption(article, i, ai_summary)
+
                     if article.image_url:
-                        send_telegram_photo(
-                            token=token,
-                            chat_id=chat_id,
-                            photo_url=article.image_url,
-                            caption=caption,
-                        )
+                        send_telegram_photo(..., photo_url=article.image_url, caption=caption)
                     else:
-                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
+                        send_telegram_message(..., text=caption)
+
                     sent_total += 1
                 except Exception as e:
-                    print(f"⚠️ sendPhoto failed for world #{i}: {e} -> fallback to text")
-                    try:
-                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
-                        sent_total += 1
-                    except Exception as e2:
-                        print(f"❌ fallback sendMessage also failed for world #{i}: {e2}")
-
+                    print(f"⚠️ Failed to send article ({topic_name} #{i}): {e}")
         except Exception as e:
             print(f"⚠️ Failed to fetch {topic_name}: {e}")
+
 
     # Gửi tin Thế giới: 4 tin hot nhất
     try:
