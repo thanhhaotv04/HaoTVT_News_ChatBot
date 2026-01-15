@@ -253,14 +253,34 @@ def send_telegram_photo(*, token: str, chat_id: str, photo_url: str, caption: st
 
 def main() -> int:
     """Hàm main."""
-    # ... (phần encoding như cũ) ...
-    
+    # Cố gắng set encoding UTF-8 để in tiếng Việt trên một số console Windows.
+    try:
+        stdout_reconf = getattr(sys.stdout, "reconfigure", None)
+        stderr_reconf = getattr(sys.stderr, "reconfigure", None)
+        if callable(stdout_reconf):
+            stdout_reconf(encoding="utf-8")
+        if callable(stderr_reconf):
+            stderr_reconf(encoding="utf-8")
+    except Exception:
+        pass
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     gemini_api_key = os.getenv("GEMINI_API_KEY")
 
     if not token or not chat_id:
-        # ... (phần preview như cũ) ...
+        # Cho phép chạy thử local mà không cần cấu hình đủ env.
+        print(
+            "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. "
+            "Set these env vars (hoặc GitHub Secrets) để bot gửi tin."
+        )
+        # Test với một feed
+        articles = fetch_articles_from_feed(VNEXPRESS_RSS_FEEDS["cong-nghe"], limit=3)
+        print(f"\n📰 Preview - Công nghệ (3 tin):")
+        for i, a in enumerate(articles, 1):
+            print(f"{i}. {a.title}")
+            if a.summary:
+                print(f"   {a.summary[:100]}...")
         return 0
 
     now_vn = datetime.now(VN_TZ)
@@ -284,66 +304,15 @@ def main() -> int:
     for topic_name, rss_url in vn_topics.items():
         try:
             articles = fetch_articles_from_feed(rss_url, limit=3)
-            if articles:
-                # Gửi header chủ đề
-                topic_header = f"🇻🇳 <b>{topic_name}</b>\n"
-                send_telegram_message(token=token, chat_id=chat_id, text=topic_header)
+            if not articles:
+                print(f"⚠️ Không tìm thấy bài nào cho chủ đề {topic_name}")
+                continue
 
-                # Gửi từng tin
-                                # Gửi từng tin
-                for i, article in enumerate(articles, start=1):
-                    try:
-                        # Tóm tắt bằng AI nếu có API key
-                        ai_summary = None
-                        if gemini_api_key:
-                            print(f"🤖 Đang tóm tắt bài {i} ({topic_name}) bằng Gemini...")
-                            ai_summary = summarize_with_gemini(article, gemini_api_key)
-                            if ai_summary:
-                                print(f"✅ Đã tóm tắt bài {i}")
-                            else:
-                                print(f"⚠️ Không thể tóm tắt bài {i}, dùng summary RSS")
+            # Gửi header chủ đề
+            topic_header = f"🇻🇳 <b>{topic_name}</b>\n"
+            send_telegram_message(token=token, chat_id=chat_id, text=topic_header)
 
-                        # Format caption với AI summary hoặc RSS summary
-                        caption = format_article_caption(article, i, ai_summary)
-
-                        if article.image_url:
-                            send_telegram_photo(
-                                token=token,
-                                chat_id=chat_id,
-                                photo_url=article.image_url,
-                                caption=caption,
-                            )
-                        else:
-                            send_telegram_message(token=token, chat_id=chat_id, text=caption)
-                        sent_total += 1
-                    except Exception as e:
-                        print(f"⚠️ Failed to send article: {e}")
-                        
-                        # Format caption với AI summary
-                        caption = format_article_caption(article, i, ai_summary)
-                        
-                        if article.image_url:
-                            send_telegram_photo(
-                                token=token,
-                                chat_id=chat_id,
-                                photo_url=article.image_url,
-                                caption=caption,
-                            )
-                        else:
-                            send_telegram_message(token=token, chat_id=chat_id, text=caption)
-                        sent_total += 1
-                    except Exception as e:
-                        print(f"⚠️ Failed to send article: {e}")
-        except Exception as e:
-            print(f"⚠️ Failed to fetch {topic_name}: {e}")
-
-    # Gửi tin Thế giới: 4 tin hot nhất
-    try:
-        world_articles = fetch_articles_from_feed(VNEXPRESS_RSS_FEEDS["the-gioi"], limit=4)
-        if world_articles:
-            world_header = f"🌍 <b>Thế giới</b>\n"
-            send_telegram_message(token=token, chat_id=chat_id, text=world_header)
-
+            # Gửi từng tin
             for i, article in enumerate(articles, start=1):
                 try:
                     # Tóm tắt bằng AI nếu có API key
@@ -370,11 +339,32 @@ def main() -> int:
                         send_telegram_message(token=token, chat_id=chat_id, text=caption)
                     sent_total += 1
                 except Exception as e:
-                    print(f"⚠️ Failed to send article: {e}")
-                    
-                    # Format caption với AI summary
+                    print(f"⚠️ Failed to send article ({topic_name} #{i}): {e}")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch {topic_name}: {e}")
+
+    # Gửi tin Thế giới: 4 tin hot nhất
+    try:
+        world_articles = fetch_articles_from_feed(VNEXPRESS_RSS_FEEDS["the-gioi"], limit=4)
+        if world_articles:
+            world_header = f"🌍 <b>Thế giới</b>\n"
+            send_telegram_message(token=token, chat_id=chat_id, text=world_header)
+
+            for i, article in enumerate(world_articles, start=1):
+                try:
+                    # Tóm tắt bằng AI nếu có API key
+                    ai_summary = None
+                    if gemini_api_key:
+                        print(f"🤖 Đang tóm tắt bài thế giới {i} bằng Gemini...")
+                        ai_summary = summarize_with_gemini(article, gemini_api_key)
+                        if ai_summary:
+                            print(f"✅ Đã tóm tắt bài thế giới {i}")
+                        else:
+                            print(f"⚠️ Không thể tóm tắt bài {i}, dùng summary RSS")
+
+                    # Format caption với AI summary hoặc RSS summary
                     caption = format_article_caption(article, i, ai_summary)
-                    
+
                     if article.image_url:
                         send_telegram_photo(
                             token=token,
@@ -386,12 +376,15 @@ def main() -> int:
                         send_telegram_message(token=token, chat_id=chat_id, text=caption)
                     sent_total += 1
                 except Exception as e:
-                    print(f"⚠️ Failed to send world article: {e}")
+                    print(f"⚠️ Failed to send world article #{i}: {e}")
+        else:
+            print("⚠️ Không tìm thấy bài nào cho Thế giới")
     except Exception as e:
         print(f"⚠️ Failed to fetch Thế giới: {e}")
 
     print(f"✅ Sent {sent_total} articles to Telegram.")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
