@@ -35,6 +35,7 @@ VNEXPRESS_RSS_FEEDS = {
     "chinh-tri": "https://vnexpress.net/rss/chinh-tri.rss",
     "kinh-te": "https://vnexpress.net/rss/kinh-te.rss",
     "the-gioi": "https://vnexpress.net/rss/the-gioi.rss",
+    "tin-moi-nhat" : "https://vnexpress.net/rss/tin-moi-nhat.rss",
 }
 
 
@@ -224,6 +225,42 @@ def fetch_articles_from_feed(rss_url: str, limit: int = 3) -> List[Article]:
     all_articles: List[Article] = [_entry_to_article(e) for e in getattr(feed, "entries", [])]
     return all_articles[:limit]
 
+def _dedupe_articles(articles: List[Article]) -> List[Article]:
+    seen = set()
+    out: List[Article] = []
+    for a in articles:
+        key = (a.link or a.title).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
+def fetch_articles_with_fallback(primary_url: str, fallback_url: str, limit: int) -> List[Article]:
+    """
+    Lấy đủ `limit` bài: ưu tiên primary, thiếu thì bù từ fallback.
+    """
+    primary: List[Article] = []
+    try:
+        primary = fetch_articles_from_feed(primary_url, limit=limit)
+    except Exception as e:
+        print(f"⚠️ Primary feed failed: {e}")
+
+    primary = _dedupe_articles(primary)
+
+    if len(primary) >= limit:
+        return primary[:limit]
+
+    needed = limit - len(primary)
+    fallback: List[Article] = []
+    try:
+        fallback = fetch_articles_from_feed(fallback_url, limit=limit + 10)  # lấy dư để dedupe
+    except Exception as e:
+        print(f"⚠️ Fallback feed failed: {e}")
+
+    combined = _dedupe_articles(primary + fallback)
+    return combined[:limit]
 
 def send_telegram_message(*, token: str, chat_id: str, text: str) -> None:
     """Gửi message qua Telegram Bot API."""
@@ -303,7 +340,7 @@ def main() -> int:
 
     for topic_name, rss_url in vn_topics.items():
         try:
-            articles = fetch_articles_from_feed(rss_url, limit=3)
+            articles = fetch_articles_from_feed(rss_url, limit=2)
             if not articles:
                 print(f"⚠️ Không tìm thấy bài nào cho chủ đề {topic_name}")
                 continue
@@ -345,7 +382,11 @@ def main() -> int:
 
     # Gửi tin Thế giới: 4 tin hot nhất
     try:
-        world_articles = fetch_articles_from_feed(VNEXPRESS_RSS_FEEDS["the-gioi"], limit=4)
+        world_articles = fetch_articles_with_fallback(
+            primary_url=VNEXPRESS_RSS_FEEDS["the-gioi"],
+            fallback_url=VNEXPRESS_RSS_FEEDS["tin-moi-nhat"],
+            limit=4,
+        )
         if world_articles:
             world_header = f"🌍 <b>Thế giới</b>\n"
             send_telegram_message(token=token, chat_id=chat_id, text=world_header)
