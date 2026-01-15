@@ -331,8 +331,7 @@ def main() -> int:
 
     sent_total = 0
 
-    # Gửi tin VN: 3 tin mỗi chủ đề
-        # Gửi tin VN: 2 tin mỗi chủ đề (có fallback sang tin mới nhất)
+    # Gửi tin VN: 2 tin mỗi chủ đề (có fallback sang tin mới nhất)
     vn_topics = {
         "Công nghệ": VNEXPRESS_RSS_FEEDS["cong-nghe"],
         "Chính trị": VNEXPRESS_RSS_FEEDS["chinh-tri"],
@@ -385,6 +384,47 @@ def main() -> int:
                     print(f"⚠️ Failed to send article ({topic_name} #{i}): {e}")
         except Exception as e:
             print(f"⚠️ Failed to fetch {topic_name}: {e}")
+
+    # Gửi tin Thế giới: 4 tin hot nhất
+    try:
+        world_articles = fetch_articles_with_fallback(
+            primary_url=VNEXPRESS_RSS_FEEDS["the-gioi"],
+            fallback_url=VNEXPRESS_RSS_FEEDS["tin-moi-nhat"],
+            limit=4,
+        )
+        if world_articles:
+            world_header = f"🌍 <b>Thế giới</b>\n"
+            send_telegram_message(token=token, chat_id=chat_id, text=world_header)
+
+            for i, article in enumerate(world_articles, start=1):
+                ai_summary = None
+                if gemini_api_key:
+                    ai_summary = summarize_with_gemini(article, gemini_api_key)
+
+                caption = format_article_caption(article, i, ai_summary)
+
+                try:
+                    if article.image_url:
+                        send_telegram_photo(
+                            token=token,
+                            chat_id=chat_id,
+                            photo_url=article.image_url,
+                            caption=caption,
+                        )
+                    else:
+                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
+                    sent_total += 1
+                except Exception as e:
+                    print(f"⚠️ sendPhoto failed for world #{i}: {e} -> fallback to text")
+                    try:
+                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
+                        sent_total += 1
+                    except Exception as e2:
+                        print(f"❌ fallback sendMessage also failed for world #{i}: {e2}")
+        else:
+            print("⚠️ Không tìm thấy bài nào cho Thế giới")
+    except Exception as e:
+        print(f"⚠️ Failed to fetch Thế giới: {e}")
 
     print(f"✅ Sent {sent_total} articles to Telegram.")
     return 0
