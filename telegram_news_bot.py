@@ -342,7 +342,7 @@ def main() -> int:
     # Gửi header
     header_msg = f"📰 Tin tức nóng ngày {today.strftime('%d/%m/%Y')}\n"
     if gemini_api_key:
-        header_msg += "🤖 Đã bật tóm tắt AI bằng Gemini 2.5 Pro\n"
+        header_msg += "🤖 Đã bật tóm tắt AI bằng Gemini\n"
     send_telegram_message(token=token, chat_id=chat_id, text=header_msg)
 
     sent_total = 0
