@@ -202,6 +202,73 @@ def format_article_caption(article: Article, index: int, ai_summary: str | None 
     
     return caption
 
+def fetch_crypto_data() -> dict:
+    """Lấy dữ liệu giá và biến động 24h của BTC, ETH, SOL."""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"⚠️ Failed to fetch crypto data: {e}")
+        return {}
+
+def fetch_fear_and_greed_index() -> str:
+    """Lấy chỉ số sợ hãi và tham lam (Fear & Greed Index)."""
+    url = "https://api.alternative.me/fng/?limit=1"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return f"{data['data'][0]['value']} - {data['data'][0]['value_classification']}"
+    except Exception as e:
+        print(f"⚠️ Failed to fetch Fear & Greed Index: {e}")
+        return "Unknown"
+
+def predict_crypto_with_gemini(crypto_data: dict, fng: str, world_news: List[Article], api_key: str) -> str | None:
+    """Dự đoán xu hướng Crypto với Gemini dựa trên tin tức thế giới và dữ liệu."""
+    if not api_key or not crypto_data:
+        return None
+        
+    news_context = "\n".join([f"- {a.title}" for a in world_news]) if world_news else "Không có tin tức nổi bật."
+    
+    prompt = f"""Bạn là một chuyên gia phân tích tài chính và Crypto.
+Trọng tâm phân tích là Bitcoin (BTC), Ethereum (ETH), và Solana (SOL).
+
+Dữ liệu hiện tại:
+- Tâm lý thị trường (Fear & Greed Index): {fng}
+- BTC: {crypto_data.get('bitcoin', {}).get('usd', 'N/A')} USD (Biến động 24h: {crypto_data.get('bitcoin', {}).get('usd_24h_change', 0):.2f}%)
+- ETH: {crypto_data.get('ethereum', {}).get('usd', 'N/A')} USD (Biến động 24h: {crypto_data.get('ethereum', {}).get('usd_24h_change', 0):.2f}%)
+- SOL: {crypto_data.get('solana', {}).get('usd', 'N/A')} USD (Biến động 24h: {crypto_data.get('solana', {}).get('usd_24h_change', 0):.2f}%)
+
+Tin tức thế giới nổi bật:
+{news_context}
+
+Yêu cầu:
+Dựa vào tình hình địa chính trị (tin tức trên), biến động giá và tâm lý người chơi (Fear & Greed), hãy đưa ra dự đoán ngắn gọn về xu hướng sắp tới của BTC, ETH, SOL. Phân tích qua về góc nhìn biểu đồ (Price action) và tâm lý.
+Viết 1 đoạn (khoảng 150-250 từ), sử dụng tiếng Việt, định dạng dễ đọc bằng HTML tags hợp lệ cho Telegram (<b>, <i>).
+Cuối đoạn thêm dòng chữ in nghiêng: "<i>Lưu ý: Nhận định từ AI chỉ mang tính tham khảo, không phải lời khuyên đầu tư.</i>"
+"""
+    
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 600}
+    }
+    
+    try:
+        r = requests.post(url, params={"key": api_key}, headers=headers, json=payload, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            parts = data["candidates"][0]["content"]["parts"]
+            texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+            return "".join(texts).strip()
+    except Exception as e:
+        print(f"⚠️ Crypto Gemini API error: {e}")
+        
+    return None
+
 def _entry_to_article(entry) -> Article:
     """Chuyển RSS entry thành Article object."""
     title = (getattr(entry, "title", "") or "").strip()
@@ -386,6 +453,7 @@ def main() -> int:
             print(f"⚠️ Failed to fetch {topic_name}: {e}")
 
     # Gửi tin Thế giới: 4 tin hot nhất
+    world_articles = []
     try:
         world_articles = fetch_articles_with_fallback(
             primary_url=VNEXPRESS_RSS_FEEDS["the-gioi"],
@@ -426,7 +494,36 @@ def main() -> int:
     except Exception as e:
         print(f"⚠️ Failed to fetch Thế giới: {e}")
 
-    print(f"✅ Sent {sent_total} articles to Telegram.")
+    # Gửi tin Crypto & Dự đoán AI
+    try:
+        crypto_data = fetch_crypto_data()
+        if crypto_data:
+            fng = fetch_fear_and_greed_index()
+            crypto_msg = f"📈 <b>Cập nhật Crypto & AI Dự đoán</b>\n\n"
+            crypto_msg += f"🧭 Tâm lý thị trường: <b>{fng}</b>\n\n"
+            
+            for coin, name in [('bitcoin', 'BTC'), ('ethereum', 'ETH'), ('solana', 'SOL')]:
+                data = crypto_data.get(coin, {})
+                price = data.get('usd', 0)
+                change = data.get('usd_24h_change', 0)
+                icon = "🟢" if change >= 0 else "🔴"
+                crypto_msg += f"• <b>{name}</b>: ${price:,.2f} ({icon} {change:+.2f}%)\n"
+            
+            ai_prediction = None
+            if gemini_api_key:
+                ai_prediction = predict_crypto_with_gemini(crypto_data, fng, world_articles, gemini_api_key)
+                
+            if ai_prediction:
+                crypto_msg += f"\n🤖 <b>AI Dự đoán & Phân tích:</b>\n{ai_prediction}"
+            else:
+                crypto_msg += "\n<i>(Không thể tạo nhận định AI lúc này)</i>"
+                
+            send_telegram_message(token=token, chat_id=chat_id, text=crypto_msg)
+            sent_total += 1
+    except Exception as e:
+        print(f"⚠️ Failed to send Crypto update: {e}")
+
+    print(f"✅ Sent messages for {sent_total} requests to Telegram.")
     return 0
 
 
