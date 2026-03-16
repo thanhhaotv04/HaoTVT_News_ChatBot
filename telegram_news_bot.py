@@ -32,8 +32,8 @@ load_dotenv()
 # RSS feeds cho các chủ đề
 VNEXPRESS_RSS_FEEDS = {
     "cong-nghe": "https://vnexpress.net/rss/cong-nghe.rss",
-    "chinh-tri": "https://vnexpress.net/rss/chinh-tri.rss",
-    "kinh-te": "https://vnexpress.net/rss/kinh-te.rss",
+    "thoi-su": "https://vnexpress.net/rss/thoi-su.rss",
+    "kinh-doanh": "https://vnexpress.net/rss/kinh-doanh.rss",
     "the-gioi": "https://vnexpress.net/rss/the-gioi.rss",
     "tin-moi-nhat" : "https://vnexpress.net/rss/tin-moi-nhat.rss",
 }
@@ -334,8 +334,8 @@ def main() -> int:
     # Gửi tin VN: 2 tin mỗi chủ đề (có fallback sang tin mới nhất)
     vn_topics = {
         "Công nghệ": VNEXPRESS_RSS_FEEDS["cong-nghe"],
-        "Chính trị": VNEXPRESS_RSS_FEEDS["chinh-tri"],
-        "Kinh tế": VNEXPRESS_RSS_FEEDS["kinh-te"],
+        "Thời sự": VNEXPRESS_RSS_FEEDS["thoi-su"],
+        "Kinh doanh": VNEXPRESS_RSS_FEEDS["kinh-doanh"],
     }
 
     for topic_name, rss_url in vn_topics.items():
