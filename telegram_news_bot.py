@@ -1,10 +1,8 @@
 """
 AI News Chatbot - Telegram Bot gửi tin tức VNExpress mỗi sáng
 
-Bot tự động lấy tin nóng từ các chủ đề:
-- 3 tin Công nghệ, Chính trị, Kinh tế (Việt Nam)
-- 4 tin Thế giới
-Gửi qua Telegram mỗi sáng kèm hình ảnh (không có link).
+Bot tự động lấy khoảng 15 tin nóng nhất trong 24h gần nhất và gửi qua
+Telegram lúc 6:00 sáng mỗi ngày bằng GitHub Actions.
 
 Cấu hình:
   - TELEGRAM_BOT_TOKEN: Token bot từ @BotFather
@@ -16,12 +14,14 @@ Cách chạy:
 from __future__ import annotations
 
 import calendar
+import html
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Iterable, List, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import List
 
 import feedparser
 import requests
@@ -31,12 +31,42 @@ load_dotenv()
 
 # RSS feeds cho các chủ đề
 VNEXPRESS_RSS_FEEDS = {
+    "tin-noi-bat": "https://vnexpress.net/rss/tin-noi-bat.rss",
+    "tin-moi-nhat": "https://vnexpress.net/rss/tin-moi-nhat.rss",
+    "tin-xem-nhieu": "https://vnexpress.net/rss/tin-xem-nhieu.rss",
     "cong-nghe": "https://vnexpress.net/rss/cong-nghe.rss",
     "thoi-su": "https://vnexpress.net/rss/thoi-su.rss",
     "kinh-doanh": "https://vnexpress.net/rss/kinh-doanh.rss",
     "the-gioi": "https://vnexpress.net/rss/the-gioi.rss",
-    "tin-moi-nhat" : "https://vnexpress.net/rss/tin-moi-nhat.rss",
+    "giai-tri": "https://vnexpress.net/rss/giai-tri.rss",
+    "the-thao": "https://vnexpress.net/rss/the-thao.rss",
+    "giao-duc": "https://vnexpress.net/rss/giao-duc.rss",
+    "suc-khoe": "https://vnexpress.net/rss/suc-khoe.rss",
+    "phap-luat": "https://vnexpress.net/rss/phap-luat.rss",
 }
+
+HOT_NEWS_FEED_KEYS = (
+    "tin-noi-bat",
+    "tin-moi-nhat",
+    "tin-xem-nhieu",
+    "thoi-su",
+    "the-gioi",
+    "kinh-doanh",
+    "cong-nghe",
+    "suc-khoe",
+    "giao-duc",
+    "phap-luat",
+)
+
+GEMINI_MODEL_FALLBACK = (
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-flash-lite-latest",
+)
+TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _get_vn_timezone() -> timezone:
@@ -50,6 +80,122 @@ def _get_vn_timezone() -> timezone:
 
 
 VN_TZ = _get_vn_timezone()
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Đọc biến môi trường dạng số nguyên, có chặn giá trị tối thiểu."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"⚠️ Invalid {name}={raw!r}; using {default}")
+        return default
+    return max(minimum, value)
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """Cắt text theo giới hạn Telegram, giữ dấu ba chấm nếu bị rút gọn."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _escape_html_text(text: str) -> str:
+    """Escape nội dung động để Telegram HTML parse mode không bị lỗi."""
+    return html.escape(text or "", quote=False)
+
+
+def _allow_basic_telegram_html(text: str) -> str:
+    """
+    Cho phép AI dùng một số tag Telegram an toàn, escape toàn bộ phần còn lại.
+    """
+    escaped = _escape_html_text(text)
+    for tag in ("b", "i", "u", "s", "code", "pre"):
+        escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
+        escaped = escaped.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
+    return escaped
+
+
+def _extract_gemini_text(data: dict) -> str | None:
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+        text = "".join(texts).strip()
+        return text or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _post_with_retries(url: str, *, attempts: int = 3, **kwargs) -> requests.Response:
+    """POST có retry ngắn cho Telegram/Gemini khi gặp rate-limit hoặc 5xx."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, **kwargs)
+            if response.status_code not in RETRY_STATUS_CODES or attempt == attempts:
+                return response
+            retry_after = response.headers.get("Retry-After", "")
+            delay = int(retry_after) if retry_after.isdigit() else attempt
+            print(f"⚠️ POST {response.status_code}; retrying in {delay}s ({attempt}/{attempts})")
+            time.sleep(delay)
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+            time.sleep(attempt)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("POST failed without a response")
+
+
+def _generate_gemini_text(
+    *,
+    prompt: str,
+    api_key: str,
+    temperature: float,
+    max_output_tokens: int,
+) -> str | None:
+    """Gọi Gemini với model fallback để bot không chết vì một model lỗi/quota."""
+    if not api_key:
+        return None
+
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
+        },
+    }
+
+    for model in GEMINI_MODEL_FALLBACK:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            response = _post_with_retries(
+                url,
+                params={"key": api_key},
+                headers=headers,
+                json=payload,
+                timeout=30,
+                attempts=2,
+            )
+            if response.status_code == 200:
+                return _extract_gemini_text(response.json())
+            if response.status_code in {404, 429, 500, 502, 503, 504}:
+                print(f"⚠️ Gemini model {model} unavailable/quota ({response.status_code}); trying fallback")
+                continue
+            print(f"⚠️ Gemini API error {response.status_code}: {response.text[:200]}")
+            return None
+        except Exception as exc:
+            print(f"⚠️ Gemini model {model} failed: {exc}")
+            continue
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -122,7 +268,7 @@ def _extract_summary(entry) -> str:
 
 def summarize_with_gemini(article: Article, api_key: str) -> str | None:
     """
-    Dùng Gemini 2.5 Pro để tóm tắt bài báo.
+    Dùng Gemini để tóm tắt bài báo.
     Trả về None nếu lỗi hoặc không có API key.
     """
     if not api_key:
@@ -144,63 +290,37 @@ Yêu cầu:
 - Loại bỏ các từ ngữ không cần thiết
 """
 
-    # Sử dụng Gemini 2.0 Flash (hoặc gemini-2.5-pro khi có sẵn)
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 250,
-        }
-    }
-    
-    try:
-        r = requests.post(
-            url,
-            params={"key": api_key},
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        
-        if r.status_code != 200:
-            # 429 = quota exceeded, không cần log lỗi
-            if r.status_code == 429:
-                return None
-            print(f"⚠️ Gemini API error {r.status_code}: {r.text[:200]}")
-            return None
-        
-        data = r.json()
-        try:
-            parts = data["candidates"][0]["content"]["parts"]
-            texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
-            summary = "".join(texts).strip()
-            return summary if summary else None
-        except (KeyError, IndexError, TypeError):
-            return None
-            
-    except Exception as e:
-        print(f"⚠️ Failed to call Gemini API: {e}")
-        return None
+    return _generate_gemini_text(
+        prompt=prompt,
+        api_key=api_key,
+        temperature=0.3,
+        max_output_tokens=250,
+    )
 
-def format_article_caption(article: Article, index: int, ai_summary: str | None = None) -> str:
+def format_article_caption(
+    article: Article,
+    index: int,
+    ai_summary: str | None = None,
+    *,
+    max_length: int = TELEGRAM_MESSAGE_LIMIT,
+) -> str:
     """Format caption cho một bài báo (ưu tiên AI summary nếu có, fallback về RSS summary)."""
-    title = article.title or "(Không có tiêu đề)"
-    caption = f"<b>{index}. {title}</b>"
+    title = _escape_html_text(article.title or "(Không có tiêu đề)")
+    body = ai_summary or article.summary or ""
+
+    def build(body_text: str) -> str:
+        caption_text = f"<b>{index}. {title}</b>"
+        if body_text:
+            caption_text += f"\n\n{_escape_html_text(body_text)}"
+        return caption_text
+
+    caption = build(body)
+    while len(caption) > max_length and body:
+        overflow = len(caption) - max_length
+        body = _clip_text(body, max(0, len(body) - overflow - 3))
+        caption = build(body)
     
-    # Ưu tiên dùng AI summary nếu có
-    if ai_summary:
-        caption += f"\n\n{ai_summary}"
-    elif article.summary:
-        # Fallback về summary từ RSS
-        caption += f"\n\n{article.summary}"
-    
-    return caption
+    return _clip_text(caption, max_length)
 
 def fetch_crypto_data() -> dict:
     """Lấy dữ liệu giá và biến động 24h của BTC, ETH, SOL."""
@@ -250,30 +370,18 @@ Viết 1 đoạn (khoảng 150-250 từ), sử dụng tiếng Việt, định d�
 Cuối đoạn thêm dòng chữ in nghiêng: "<i>Lưu ý: Nhận định từ AI chỉ mang tính tham khảo, không phải lời khuyên đầu tư.</i>"
 """
     
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 600}
-    }
-    
-    try:
-        r = requests.post(url, params={"key": api_key}, headers=headers, json=payload, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            parts = data["candidates"][0]["content"]["parts"]
-            texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
-            return "".join(texts).strip()
-    except Exception as e:
-        print(f"⚠️ Crypto Gemini API error: {e}")
-        
-    return None
+    return _generate_gemini_text(
+        prompt=prompt,
+        api_key=api_key,
+        temperature=0.5,
+        max_output_tokens=600,
+    )
 
 def _entry_to_article(entry) -> Article:
     """Chuyển RSS entry thành Article object."""
     title = (getattr(entry, "title", "") or "").strip()
     link = (getattr(entry, "link", "") or "").strip()
-    published_parsed = getattr(entry, "published_parsed", None)
+    published_parsed = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
     if published_parsed is not None:
         # published_parsed là struct_time UTC.
         dt_utc = datetime.fromtimestamp(calendar.timegm(published_parsed), tz=timezone.utc)
@@ -286,10 +394,26 @@ def _entry_to_article(entry) -> Article:
     return Article(title=title, link=link, published_at=dt_vn, image_url=image_url, summary=summary)
 
 
-def fetch_articles_from_feed(rss_url: str, limit: int = 3) -> List[Article]:
+def _is_article_recent(article: Article, since: datetime | None) -> bool:
+    if since is None:
+        return True
+    if article.published_at is None:
+        return False
+    return article.published_at >= since
+
+
+def fetch_articles_from_feed(
+    rss_url: str,
+    limit: int = 3,
+    *,
+    since: datetime | None = None,
+) -> List[Article]:
     """Lấy tin từ một RSS feed cụ thể."""
     feed = fetch_vnexpress_latest_raw(rss_url)
     all_articles: List[Article] = [_entry_to_article(e) for e in getattr(feed, "entries", [])]
+    all_articles = [a for a in all_articles if _is_article_recent(a, since)]
+    all_articles.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=VN_TZ), reverse=True)
+    all_articles = _dedupe_articles(all_articles)
     return all_articles[:limit]
 
 def _dedupe_articles(articles: List[Article]) -> List[Article]:
@@ -304,13 +428,19 @@ def _dedupe_articles(articles: List[Article]) -> List[Article]:
     return out
 
 
-def fetch_articles_with_fallback(primary_url: str, fallback_url: str, limit: int) -> List[Article]:
+def fetch_articles_with_fallback(
+    primary_url: str,
+    fallback_url: str,
+    limit: int,
+    *,
+    since: datetime | None = None,
+) -> List[Article]:
     """
     Lấy đủ `limit` bài: ưu tiên primary, thiếu thì bù từ fallback.
     """
     primary: List[Article] = []
     try:
-        primary = fetch_articles_from_feed(primary_url, limit=limit)
+        primary = fetch_articles_from_feed(primary_url, limit=limit, since=since)
     except Exception as e:
         print(f"⚠️ Primary feed failed: {e}")
 
@@ -319,26 +449,47 @@ def fetch_articles_with_fallback(primary_url: str, fallback_url: str, limit: int
     if len(primary) >= limit:
         return primary[:limit]
 
-    needed = limit - len(primary)
     fallback: List[Article] = []
     try:
-        fallback = fetch_articles_from_feed(fallback_url, limit=limit + 10)  # lấy dư để dedupe
+        fallback = fetch_articles_from_feed(fallback_url, limit=limit + 10, since=since)  # lấy dư để dedupe
     except Exception as e:
         print(f"⚠️ Fallback feed failed: {e}")
 
     combined = _dedupe_articles(primary + fallback)
     return combined[:limit]
 
+
+def fetch_hot_articles(
+    *,
+    limit: int = 15,
+    since: datetime | None = None,
+    feed_keys: tuple[str, ...] = HOT_NEWS_FEED_KEYS,
+) -> List[Article]:
+    """Gom nhiều RSS feed, dedupe, rồi lấy các bài mới nhất trong ngày."""
+    candidates: List[Article] = []
+    per_feed_limit = max(limit, 20)
+
+    for key in feed_keys:
+        rss_url = VNEXPRESS_RSS_FEEDS[key]
+        try:
+            candidates.extend(fetch_articles_from_feed(rss_url, limit=per_feed_limit, since=since))
+        except Exception as exc:
+            print(f"⚠️ Failed to fetch feed {key}: {exc}")
+
+    candidates.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=VN_TZ), reverse=True)
+    return _dedupe_articles(candidates)[:limit]
+
+
 def send_telegram_message(*, token: str, chat_id: str, text: str) -> None:
     """Gửi message qua Telegram Bot API."""
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text,
+        "text": _clip_text(text, TELEGRAM_MESSAGE_LIMIT),
         "disable_web_page_preview": True,
         "parse_mode": "HTML",
     }
-    r = requests.post(url, data=payload, timeout=30)
+    r = _post_with_retries(url, data=payload, timeout=30)
     r.raise_for_status()
 
 
@@ -348,11 +499,48 @@ def send_telegram_photo(*, token: str, chat_id: str, photo_url: str, caption: st
     payload = {
         "chat_id": chat_id,
         "photo": photo_url,
-        "caption": caption,
+        "caption": _clip_text(caption, TELEGRAM_PHOTO_CAPTION_LIMIT),
         "parse_mode": "HTML",
     }
-    r = requests.post(url, data=payload, timeout=30)
+    r = _post_with_retries(url, data=payload, timeout=30)
     r.raise_for_status()
+
+
+def send_article_to_telegram(
+    *,
+    token: str,
+    chat_id: str,
+    article: Article,
+    index: int,
+    ai_summary: str | None = None,
+) -> bool:
+    """Gửi một bài báo, ưu tiên ảnh nhưng fallback sang text nếu ảnh lỗi."""
+    if article.image_url:
+        try:
+            caption = format_article_caption(
+                article,
+                index,
+                ai_summary,
+                max_length=TELEGRAM_PHOTO_CAPTION_LIMIT,
+            )
+            send_telegram_photo(
+                token=token,
+                chat_id=chat_id,
+                photo_url=article.image_url,
+                caption=caption,
+            )
+            return True
+        except Exception as exc:
+            print(f"⚠️ sendPhoto failed for #{index}: {exc} -> fallback to text")
+
+    caption = format_article_caption(
+        article,
+        index,
+        ai_summary,
+        max_length=TELEGRAM_MESSAGE_LIMIT,
+    )
+    send_telegram_message(token=token, chat_id=chat_id, text=caption)
+    return True
 
 
 def main() -> int:
@@ -371,6 +559,10 @@ def main() -> int:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     gemini_api_key = os.getenv("GEMINI_API_KEY")
+    lookback_hours = _env_int("ARTICLE_LOOKBACK_HOURS", 24)
+    news_article_count = _env_int("NEWS_ARTICLE_COUNT", 15)
+    now_vn = datetime.now(VN_TZ)
+    since_vn = now_vn - timedelta(hours=lookback_hours)
 
     if not token or not chat_id:
         # Cho phép chạy thử local mà không cần cấu hình đủ env.
@@ -379,149 +571,45 @@ def main() -> int:
             "Set these env vars (hoặc GitHub Secrets) để bot gửi tin."
         )
         # Test với một feed
-        articles = fetch_articles_from_feed(VNEXPRESS_RSS_FEEDS["cong-nghe"], limit=3)
-        print(f"\n📰 Preview - Công nghệ (3 tin):")
+        articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
+        print(f"\n📰 Preview - {len(articles)} tin nóng trong {lookback_hours}h gần nhất:")
         for i, a in enumerate(articles, 1):
-            print(f"{i}. {a.title}")
+            published = a.published_at.strftime("%d/%m %H:%M") if a.published_at else "không rõ giờ"
+            print(f"{i}. [{published}] {a.title}")
             if a.summary:
                 print(f"   {a.summary[:100]}...")
         return 0
 
-    now_vn = datetime.now(VN_TZ)
     today = now_vn.date()
 
     # Gửi header
-    header_msg = f"📰 Tin tức nóng ngày {today.strftime('%d/%m/%Y')}\n"
+    header_msg = f"📰 <b>{news_article_count} tin tức nóng nhất trong {lookback_hours}h qua</b> - {today.strftime('%d/%m/%Y')}\n"
     if gemini_api_key:
         header_msg += "🤖 Đã bật tóm tắt AI bằng Gemini\n"
     send_telegram_message(token=token, chat_id=chat_id, text=header_msg)
 
     sent_total = 0
+    articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
+    if not articles:
+        print(f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất")
+        return 0
 
-    # Gửi tin VN: 2 tin mỗi chủ đề (có fallback sang tin mới nhất)
-    vn_topics = {
-        "Công nghệ": VNEXPRESS_RSS_FEEDS["cong-nghe"],
-        "Thời sự": VNEXPRESS_RSS_FEEDS["thoi-su"],
-        "Kinh doanh": VNEXPRESS_RSS_FEEDS["kinh-doanh"],
-    }
-
-    for topic_name, rss_url in vn_topics.items():
+    for i, article in enumerate(articles, start=1):
         try:
-            # Dùng fallback để luôn cố gắng đủ 2 tin
-            articles = fetch_articles_with_fallback(
-                primary_url=rss_url,
-                fallback_url=VNEXPRESS_RSS_FEEDS["tin-moi-nhat"],
-                limit=2,
-            )
-
-            if not articles:
-                print(f"⚠️ Không tìm thấy bài nào cho chủ đề {topic_name}")
-                continue
-
-            # Gửi header chủ đề
-            topic_header = f"🇻🇳 <b>{topic_name}</b>\n"
-            send_telegram_message(token=token, chat_id=chat_id, text=topic_header)
-
-            # Gửi từng tin
-            for i, article in enumerate(articles, start=1):
-                try:
-                    # Tóm tắt bằng AI nếu có API key
-                    ai_summary = None
-                    if gemini_api_key:
-                        ai_summary = summarize_with_gemini(article, gemini_api_key)
-
-                    caption = format_article_caption(article, i, ai_summary)
-
-                    if article.image_url:
-                        send_telegram_photo(
-                            token=token,
-                            chat_id=chat_id,
-                            photo_url=article.image_url,
-                            caption=caption,
-                        )
-                    else:
-                        send_telegram_message(
-                            token=token,
-                            chat_id=chat_id,
-                            text=caption,
-                        )
-
-                    sent_total += 1
-                except Exception as e:
-                    print(f"⚠️ Failed to send article ({topic_name} #{i}): {e}")
-        except Exception as e:
-            print(f"⚠️ Failed to fetch {topic_name}: {e}")
-
-    # Gửi tin Thế giới: 4 tin hot nhất
-    world_articles = []
-    try:
-        world_articles = fetch_articles_with_fallback(
-            primary_url=VNEXPRESS_RSS_FEEDS["the-gioi"],
-            fallback_url=VNEXPRESS_RSS_FEEDS["tin-moi-nhat"],
-            limit=4,
-        )
-        if world_articles:
-            world_header = f"🌍 <b>Thế giới</b>\n"
-            send_telegram_message(token=token, chat_id=chat_id, text=world_header)
-
-            for i, article in enumerate(world_articles, start=1):
-                ai_summary = None
-                if gemini_api_key:
-                    ai_summary = summarize_with_gemini(article, gemini_api_key)
-
-                caption = format_article_caption(article, i, ai_summary)
-
-                try:
-                    if article.image_url:
-                        send_telegram_photo(
-                            token=token,
-                            chat_id=chat_id,
-                            photo_url=article.image_url,
-                            caption=caption,
-                        )
-                    else:
-                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
-                    sent_total += 1
-                except Exception as e:
-                    print(f"⚠️ sendPhoto failed for world #{i}: {e} -> fallback to text")
-                    try:
-                        send_telegram_message(token=token, chat_id=chat_id, text=caption)
-                        sent_total += 1
-                    except Exception as e2:
-                        print(f"❌ fallback sendMessage also failed for world #{i}: {e2}")
-        else:
-            print("⚠️ Không tìm thấy bài nào cho Thế giới")
-    except Exception as e:
-        print(f"⚠️ Failed to fetch Thế giới: {e}")
-
-    # Gửi tin Crypto & Dự đoán AI
-    try:
-        crypto_data = fetch_crypto_data()
-        if crypto_data:
-            fng = fetch_fear_and_greed_index()
-            crypto_msg = f"📈 <b>Cập nhật Crypto & AI Dự đoán</b>\n\n"
-            crypto_msg += f"🧭 Tâm lý thị trường: <b>{fng}</b>\n\n"
-            
-            for coin, name in [('bitcoin', 'BTC'), ('ethereum', 'ETH'), ('solana', 'SOL')]:
-                data = crypto_data.get(coin, {})
-                price = data.get('usd', 0)
-                change = data.get('usd_24h_change', 0)
-                icon = "🟢" if change >= 0 else "🔴"
-                crypto_msg += f"• <b>{name}</b>: ${price:,.2f} ({icon} {change:+.2f}%)\n"
-            
-            ai_prediction = None
+            ai_summary = None
             if gemini_api_key:
-                ai_prediction = predict_crypto_with_gemini(crypto_data, fng, world_articles, gemini_api_key)
-                
-            if ai_prediction:
-                crypto_msg += f"\n🤖 <b>AI Dự đoán & Phân tích:</b>\n{ai_prediction}"
-            else:
-                crypto_msg += "\n<i>(Không thể tạo nhận định AI lúc này)</i>"
-                
-            send_telegram_message(token=token, chat_id=chat_id, text=crypto_msg)
-            sent_total += 1
-    except Exception as e:
-        print(f"⚠️ Failed to send Crypto update: {e}")
+                ai_summary = summarize_with_gemini(article, gemini_api_key)
+
+            if send_article_to_telegram(
+                token=token,
+                chat_id=chat_id,
+                article=article,
+                index=i,
+                ai_summary=ai_summary,
+            ):
+                sent_total += 1
+        except Exception as e:
+            print(f"⚠️ Failed to send hot article #{i}: {e}")
 
     print(f"✅ Sent messages for {sent_total} requests to Telegram.")
     return 0

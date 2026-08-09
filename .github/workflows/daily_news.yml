@@ -4,11 +4,11 @@ on:
   schedule:
     # Chạy mỗi ngày lúc 6:00 sáng giờ Việt Nam (23:00 UTC ngày hôm trước)
     - cron: '0 23 * * *'
-  workflow_dispatch:  # Cho phép chạy thủ công
 
 jobs:
   send-news:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
     steps:
       - name: Checkout code
@@ -18,17 +18,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          pytest -q
       
       - name: Run news bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ARTICLE_LOOKBACK_HOURS: 24
+          NEWS_ARTICLE_COUNT: 15
         run: |
           python telegram_news_bot.py
       
