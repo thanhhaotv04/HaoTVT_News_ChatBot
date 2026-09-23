@@ -10,7 +10,9 @@ Bot Python lay tin moi tu RSS VNExpress, loc khoang 15 tin nong nhat trong 24h g
 - Tu dong dedupe URL va uu tien bai co thoi gian dang moi nhat.
 - Gui anh kem caption neu co anh RSS; neu anh loi thi fallback sang tin nhan text.
 - Escape HTML va cat noi dung theo gioi han Telegram de tranh loi `parse_mode=HTML`.
+- Moi tin co link `Doc bai goc`, ke ca khi RSS khong co anh.
 - Gemini co fallback model de bot van chay khi mot model bi quota/khong kha dung.
+- Che token/API key trong log loi va bao loi workflow neu gui thieu tin.
 - GitHub Actions chay test truoc khi gui tin.
 
 ## Cau hinh
@@ -26,6 +28,7 @@ Bien moi truong tuy chon:
 - `ARTICLE_LOOKBACK_HOURS=24`
 - `NEWS_ARTICLE_COUNT=15`
 - `RSS_INSECURE=1` chi dung khi moi truong local bi loi SSL proxy
+- `GEMINI_MODEL=gemini-3.5-flash-lite` de uu tien model tuy chon truoc danh sach fallback
 
 ## Chay local
 

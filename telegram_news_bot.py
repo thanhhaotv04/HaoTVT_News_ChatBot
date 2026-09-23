@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List
+from urllib.parse import urlsplit
 
 import feedparser
 import requests
@@ -59,14 +60,14 @@ HOT_NEWS_FEED_KEYS = (
 )
 
 GEMINI_MODEL_FALLBACK = (
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
 )
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_RETRY_DELAY_SECONDS = 60
 
 
 def _get_vn_timezone() -> timezone:
@@ -110,6 +111,48 @@ def _escape_html_text(text: str) -> str:
     return html.escape(text or "", quote=False)
 
 
+def _escape_and_clip_text(text: str, limit: int) -> str:
+    """Escape rồi cắt text mà không làm vỡ HTML entity."""
+    escaped = _escape_html_text(text.strip())
+    if len(escaped) <= limit:
+        return escaped
+    if limit <= 3:
+        return ""
+
+    suffix = "..."
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        candidate = _escape_html_text(text[:mid].rstrip()) + suffix
+        if len(candidate) <= limit:
+            low = mid
+        else:
+            high = mid - 1
+    return _escape_html_text(text[:low].rstrip()) + suffix if low else ""
+
+
+def _safe_http_url(url: str | None) -> str | None:
+    """Chỉ nhận URL HTTP(S) tuyệt đối để đưa vào Telegram."""
+    if not url:
+        return None
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return url.strip()
+
+
+def _safe_error(exc: Exception, *secrets: str | None) -> str:
+    """Giữ log hữu ích nhưng không để token/API key lọt vào URL lỗi."""
+    message = str(exc)
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    return f"{type(exc).__name__}: {message}"[:500]
+
+
 def _allow_basic_telegram_html(text: str) -> str:
     """
     Cho phép AI dùng một số tag Telegram an toàn, escape toàn bộ phần còn lại.
@@ -140,7 +183,13 @@ def _post_with_retries(url: str, *, attempts: int = 3, **kwargs) -> requests.Res
             if response.status_code not in RETRY_STATUS_CODES or attempt == attempts:
                 return response
             retry_after = response.headers.get("Retry-After", "")
+            if not retry_after.isdigit() and response.status_code == 429:
+                try:
+                    retry_after = str(response.json().get("parameters", {}).get("retry_after", ""))
+                except (TypeError, ValueError):
+                    retry_after = ""
             delay = int(retry_after) if retry_after.isdigit() else attempt
+            delay = min(delay, MAX_RETRY_DELAY_SECONDS)
             print(f"⚠️ POST {response.status_code}; retrying in {delay}s ({attempt}/{attempts})")
             time.sleep(delay)
         except requests.RequestException as exc:
@@ -173,7 +222,10 @@ def _generate_gemini_text(
         },
     }
 
-    for model in GEMINI_MODEL_FALLBACK:
+    configured_model = os.getenv("GEMINI_MODEL", "").strip()
+    models = tuple(dict.fromkeys((configured_model, *GEMINI_MODEL_FALLBACK))) if configured_model else GEMINI_MODEL_FALLBACK
+
+    for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
             response = _post_with_retries(
@@ -192,7 +244,7 @@ def _generate_gemini_text(
             print(f"⚠️ Gemini API error {response.status_code}: {response.text[:200]}")
             return None
         except Exception as exc:
-            print(f"⚠️ Gemini model {model} failed: {exc}")
+            print(f"⚠️ Gemini model {model} failed: {_safe_error(exc, api_key)}")
             continue
 
     return None
@@ -233,7 +285,7 @@ def _extract_image_url(entry) -> str | None:
         if isinstance(enc, dict):
             enc_type = enc.get("type", "").lower()
             if enc_type.startswith("image/"):
-                href = enc.get("href", "").strip()
+                href = _safe_http_url(enc.get("href", ""))
                 if href:
                     return href
 
@@ -243,7 +295,7 @@ def _extract_image_url(entry) -> str | None:
         # Tìm pattern <img src="...">
         img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary, re.IGNORECASE)
         if img_match:
-            img_url = img_match.group(1).strip()
+            img_url = _safe_http_url(html.unescape(img_match.group(1)))
             if img_url:
                 return img_url
 
@@ -255,7 +307,7 @@ def _extract_summary(entry) -> str:
     summary = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
     if summary:
         # Loại bỏ HTML tags
-        summary = re.sub(r"<[^>]+>", "", summary)
+        summary = html.unescape(re.sub(r"<[^>]+>", "", summary))
         summary = summary.strip()
         # Loại bỏ các link URL (http/https)
         summary = re.sub(r"https?://[^\s]+", "", summary)
@@ -305,22 +357,31 @@ def format_article_caption(
     max_length: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> str:
     """Format caption cho một bài báo (ưu tiên AI summary nếu có, fallback về RSS summary)."""
-    title = _escape_html_text(article.title or "(Không có tiêu đề)")
+    raw_title = article.title or "(Không có tiêu đề)"
     body = ai_summary or article.summary or ""
+    prefix = f"<b>{index}. "
+    suffix = "</b>"
 
-    def build(body_text: str) -> str:
-        caption_text = f"<b>{index}. {title}</b>"
-        if body_text:
-            caption_text += f"\n\n{_escape_html_text(body_text)}"
-        return caption_text
+    safe_link = _safe_http_url(article.link)
+    link = ""
+    if safe_link:
+        escaped_link = html.escape(safe_link, quote=True)
+        candidate = f'\n\n<a href="{escaped_link}">🔗 Đọc bài gốc</a>'
+        if len(prefix) + len(suffix) + len(candidate) + 1 <= max_length:
+            link = candidate
 
-    caption = build(body)
-    while len(caption) > max_length and body:
-        overflow = len(caption) - max_length
-        body = _clip_text(body, max(0, len(body) - overflow - 3))
-        caption = build(body)
-    
-    return _clip_text(caption, max_length)
+    title_limit = max_length - len(prefix) - len(suffix) - len(link)
+    if title_limit <= 0:
+        return _escape_and_clip_text(raw_title, max_length)
+
+    title = _escape_and_clip_text(raw_title, title_limit)
+    caption = f"{prefix}{title}{suffix}"
+    body_limit = max_length - len(caption) - len(link) - 2
+    if body and body_limit > 3:
+        escaped_body = _escape_and_clip_text(body, body_limit)
+        if escaped_body:
+            caption += f"\n\n{escaped_body}"
+    return caption + link
 
 def fetch_crypto_data() -> dict:
     """Lấy dữ liệu giá và biến động 24h của BTC, ETH, SOL."""
@@ -482,28 +543,34 @@ def fetch_hot_articles(
 
 def send_telegram_message(*, token: str, chat_id: str, text: str) -> None:
     """Gửi message qua Telegram Bot API."""
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": _clip_text(text, TELEGRAM_MESSAGE_LIMIT),
         "disable_web_page_preview": True,
         "parse_mode": "HTML",
     }
-    r = _post_with_retries(url, data=payload, timeout=30)
-    r.raise_for_status()
+    _post_telegram(token=token, method="sendMessage", payload=payload)
 
 
 def send_telegram_photo(*, token: str, chat_id: str, photo_url: str, caption: str = "") -> None:
     """Gửi hình ảnh qua Telegram Bot API."""
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
     payload = {
         "chat_id": chat_id,
         "photo": photo_url,
         "caption": _clip_text(caption, TELEGRAM_PHOTO_CAPTION_LIMIT),
         "parse_mode": "HTML",
     }
-    r = _post_with_retries(url, data=payload, timeout=30)
-    r.raise_for_status()
+    _post_telegram(token=token, method="sendPhoto", payload=payload)
+
+
+def _post_telegram(*, token: str, method: str, payload: dict) -> None:
+    """Gọi Telegram API và bảo đảm exception không lộ bot token."""
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    try:
+        response = _post_with_retries(url, data=payload, timeout=30)
+        response.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(f"Telegram {method} failed: {_safe_error(exc, token)}") from None
 
 
 def send_article_to_telegram(
@@ -531,7 +598,7 @@ def send_article_to_telegram(
             )
             return True
         except Exception as exc:
-            print(f"⚠️ sendPhoto failed for #{index}: {exc} -> fallback to text")
+            print(f"⚠️ sendPhoto failed for #{index}: {_safe_error(exc, token)} -> fallback to text")
 
     caption = format_article_caption(
         article,
@@ -580,19 +647,20 @@ def main() -> int:
                 print(f"   {a.summary[:100]}...")
         return 0
 
-    today = now_vn.date()
+    articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
+    if not articles:
+        message = f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất"
+        print(message)
+        send_telegram_message(token=token, chat_id=chat_id, text=message)
+        return 1
 
-    # Gửi header
-    header_msg = f"📰 <b>{news_article_count} tin tức nóng nhất trong {lookback_hours}h qua</b> - {today.strftime('%d/%m/%Y')}\n"
+    today = now_vn.date()
+    header_msg = f"📰 <b>{len(articles)} tin tức nóng nhất trong {lookback_hours}h qua</b> - {today.strftime('%d/%m/%Y')}\n"
     if gemini_api_key:
         header_msg += "🤖 Đã bật tóm tắt AI bằng Gemini\n"
     send_telegram_message(token=token, chat_id=chat_id, text=header_msg)
 
     sent_total = 0
-    articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
-    if not articles:
-        print(f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất")
-        return 0
 
     for i, article in enumerate(articles, start=1):
         try:
@@ -609,10 +677,10 @@ def main() -> int:
             ):
                 sent_total += 1
         except Exception as e:
-            print(f"⚠️ Failed to send hot article #{i}: {e}")
+            print(f"⚠️ Failed to send hot article #{i}: {_safe_error(e, token, gemini_api_key)}")
 
-    print(f"✅ Sent messages for {sent_total} requests to Telegram.")
-    return 0
+    print(f"✅ Sent {sent_total}/{len(articles)} articles to Telegram.")
+    return 0 if sent_total == len(articles) else 1
 
 
 if __name__ == "__main__":

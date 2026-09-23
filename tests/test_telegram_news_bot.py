@@ -98,7 +98,26 @@ def test_format_article_caption_escapes_html_and_respects_limit():
 
     assert len(caption) <= 120
     assert "<b>1. A &lt;hot&gt; &amp; important</b>" in caption
-    assert "&lt;b&gt;bad html&lt;/b&gt;" in caption
+    assert "&lt;b&gt;bad" in caption
+    assert "<b>bad" not in caption
+
+
+def test_format_article_caption_keeps_valid_html_and_adds_source_link():
+    article = bot.Article("x" * 120, "https://example.com/a?x=1&y=2", summary="A & B")
+
+    short_caption = bot.format_article_caption(article, 1, max_length=40)
+    full_caption = bot.format_article_caption(article, 1, max_length=300)
+
+    assert len(short_caption) <= 40
+    assert short_caption.startswith("<b>1. ") and short_caption.endswith("</b>")
+    assert '<a href="https://example.com/a?x=1&amp;y=2">' in full_caption
+    assert "🔗 Đọc bài gốc" in full_caption
+
+
+def test_extract_summary_decodes_html_entities():
+    entry = SimpleNamespace(summary="<p>A &amp; B</p>", description="")
+
+    assert bot._extract_summary(entry) == "A & B"
 
 
 def test_send_article_falls_back_to_text_when_photo_fails(monkeypatch):
@@ -137,6 +156,20 @@ def test_post_with_retries_retries_429(monkeypatch):
     assert responses == []
 
 
+def test_post_with_retries_uses_telegram_retry_after(monkeypatch):
+    responses = [
+        FakeResponse(429, payload={"parameters": {"retry_after": 2}}),
+        FakeResponse(200),
+    ]
+    delays = []
+    monkeypatch.setattr(bot.time, "sleep", delays.append)
+    monkeypatch.setattr(bot.requests, "post", lambda *_args, **_kwargs: responses.pop(0))
+
+    bot._post_with_retries("https://api.test", attempts=2)
+
+    assert delays == [2]
+
+
 def test_generate_gemini_text_uses_model_fallback(monkeypatch):
     urls = []
     payload = {"candidates": [{"content": {"parts": [{"text": "Tóm tắt tốt"}]}}]}
@@ -157,5 +190,81 @@ def test_generate_gemini_text_uses_model_fallback(monkeypatch):
 
     assert text == "Tóm tắt tốt"
     assert len(urls) == 2
-    assert "gemini-2.0-flash" in urls[0]
-    assert "gemini-2.0-flash-lite" in urls[1]
+    assert "gemini-3.5-flash-lite" in urls[0]
+    assert "gemini-3.6-flash" in urls[1]
+
+
+def test_generate_gemini_text_redacts_api_key_from_errors(monkeypatch, capsys):
+    api_key = "secret-api-key"
+
+    def fail_post(url, **_kwargs):
+        raise requests.ConnectionError(f"failed: {url}?key={api_key}")
+
+    monkeypatch.setattr(bot, "GEMINI_MODEL_FALLBACK", ("test-model",))
+    monkeypatch.setattr(bot.requests, "post", fail_post)
+    monkeypatch.setattr(bot.time, "sleep", lambda _seconds: None)
+
+    assert bot._generate_gemini_text(
+        prompt="hello",
+        api_key=api_key,
+        temperature=0.1,
+        max_output_tokens=32,
+    ) is None
+    output = capsys.readouterr().out
+    assert api_key not in output
+    assert "<redacted>" in output
+
+
+def test_telegram_exception_does_not_expose_token(monkeypatch):
+    token = "123456:secret-token"
+
+    def fail_post(url, **_kwargs):
+        raise requests.ConnectionError(f"failed: {url}")
+
+    monkeypatch.setattr(bot, "_post_with_retries", fail_post)
+
+    with pytest.raises(RuntimeError) as error:
+        bot.send_telegram_message(token=token, chat_id="chat", text="hello")
+
+    assert token not in str(error.value)
+    assert "<redacted>" in str(error.value)
+
+
+def test_main_uses_actual_article_count_and_reports_partial_failure(monkeypatch, capsys):
+    token = "123456:secret-token"
+    articles = [
+        bot.Article("A", "https://example.com/a"),
+        bot.Article("B", "https://example.com/b"),
+    ]
+    messages = []
+    attempts = 0
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: articles)
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
+
+    def send_article(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise requests.HTTPError(f"failed https://api.telegram.org/bot{token}/sendMessage")
+        return True
+
+    monkeypatch.setattr(bot, "send_article_to_telegram", send_article)
+
+    assert bot.main() == 1
+    assert "<b>2 tin tức" in messages[0]
+    assert token not in capsys.readouterr().out
+
+
+def test_main_reports_empty_feed_to_telegram(monkeypatch):
+    messages = []
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: [])
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
+
+    assert bot.main() == 1
+    assert messages == ["⚠️ Không tìm thấy tin nào trong 24h gần nhất"]
