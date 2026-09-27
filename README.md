@@ -50,4 +50,4 @@ pytest -q
 
 ## Lich GitHub Actions
 
-Workflow `.github/workflows/daily_news.yml` chi chay luc `23:00 UTC`, tuong duong `06:00` gio Viet Nam ngay hom sau.
+Workflow `.github/workflows/daily_news.yml` chay luc `23:17 UTC`, tuong duong `06:17` gio Viet Nam ngay hom sau. Chon phut 17 de giam nguy co GitHub Actions tri hoan job vao dau moi gio; workflow cung co nut chay thu cong.

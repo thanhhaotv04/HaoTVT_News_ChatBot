@@ -49,7 +49,6 @@ VNEXPRESS_RSS_FEEDS = {
 HOT_NEWS_FEED_KEYS = (
     "tin-noi-bat",
     "tin-moi-nhat",
-    "tin-xem-nhieu",
     "thoi-su",
     "the-gioi",
     "kinh-doanh",
@@ -68,6 +67,14 @@ TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 MAX_RETRY_DELAY_SECONDS = 60
+RSS_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; HaoTVT-NewsBot/1.0; "
+        "+https://github.com/thanhhaotv04/HaoTVT_News_ChatBot)"
+    ),
+    "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+    "Cache-Control": "no-cache",
+}
 
 
 def _get_vn_timezone() -> timezone:
@@ -265,7 +272,12 @@ def fetch_vnexpress_latest_raw(rss_url: str) -> feedparser.FeedParserDict:
     """Lấy và parse RSS feed từ VNExpress."""
     insecure = os.getenv("RSS_INSECURE", "").strip().lower() in {"1", "true", "yes"}
     try:
-        r = requests.get(rss_url, timeout=30, verify=not insecure)
+        r = requests.get(
+            rss_url,
+            headers=RSS_REQUEST_HEADERS,
+            timeout=30,
+            verify=not insecure,
+        )
         r.raise_for_status()
     except Exception as e:
         hint = " (try set RSS_INSECURE=1 if behind proxy)" if not insecure else ""
@@ -529,13 +541,23 @@ def fetch_hot_articles(
     """Gom nhiều RSS feed, dedupe, rồi lấy các bài mới nhất trong ngày."""
     candidates: List[Article] = []
     per_feed_limit = max(limit, 20)
+    successful_feeds = 0
+    failures: List[str] = []
 
     for key in feed_keys:
         rss_url = VNEXPRESS_RSS_FEEDS[key]
         try:
-            candidates.extend(fetch_articles_from_feed(rss_url, limit=per_feed_limit, since=since))
+            articles = fetch_articles_from_feed(rss_url, limit=per_feed_limit, since=since)
+            successful_feeds += 1
+            candidates.extend(articles)
+            print(f"ℹ️ RSS {key}: {len(articles)} recent articles")
         except Exception as exc:
-            print(f"⚠️ Failed to fetch feed {key}: {exc}")
+            failure = f"{key}: {type(exc).__name__}: {exc}"
+            failures.append(failure)
+            print(f"⚠️ Failed to fetch feed {failure}")
+
+    if successful_feeds == 0:
+        raise RuntimeError("All RSS feeds failed: " + "; ".join(failures))
 
     candidates.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=VN_TZ), reverse=True)
     return _dedupe_articles(candidates)[:limit]
@@ -631,14 +653,25 @@ def main() -> int:
     now_vn = datetime.now(VN_TZ)
     since_vn = now_vn - timedelta(hours=lookback_hours)
 
+    try:
+        articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
+    except RuntimeError as exc:
+        print(f"❌ Không thể tải nguồn tin: {exc}")
+        if token and chat_id:
+            send_telegram_message(
+                token=token,
+                chat_id=chat_id,
+                text="⚠️ Không thể tải nguồn tin lúc này. Bot sẽ thử lại ở lịch chạy tiếp theo.",
+            )
+        return 1
+
     if not token or not chat_id:
         # Cho phép chạy thử local mà không cần cấu hình đủ env.
         print(
             "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. "
             "Set these env vars (hoặc GitHub Secrets) để bot gửi tin."
         )
-        # Test với một feed
-        articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
+        # Preview mà không gửi Telegram.
         print(f"\n📰 Preview - {len(articles)} tin nóng trong {lookback_hours}h gần nhất:")
         for i, a in enumerate(articles, 1):
             published = a.published_at.strftime("%d/%m %H:%M") if a.published_at else "không rõ giờ"
@@ -647,7 +680,6 @@ def main() -> int:
                 print(f"   {a.summary[:100]}...")
         return 0
 
-    articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
     if not articles:
         message = f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất"
         print(message)

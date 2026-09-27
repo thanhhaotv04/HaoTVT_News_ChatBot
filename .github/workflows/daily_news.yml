@@ -1,9 +1,10 @@
 name: Daily News Bot
 
 on:
+  workflow_dispatch:
   schedule:
-    # Chạy mỗi ngày lúc 6:00 sáng giờ Việt Nam (23:00 UTC ngày hôm trước)
-    - cron: '0 23 * * *'
+    # Tránh phút 00 thường bị GitHub Actions trì hoãn do tải cao.
+    - cron: '17 23 * * *'
 
 jobs:
   send-news:
@@ -12,10 +13,10 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -37,13 +38,12 @@ jobs:
           ARTICLE_LOOKBACK_HOURS: 24
           NEWS_ARTICLE_COUNT: 15
         run: |
-          python telegram_news_bot.py
+          set -o pipefail
+          python -u telegram_news_bot.py 2>&1 | tee bot.log
       
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: error-logs
-          path: |
-            *.log
-            **/*.log
+          path: bot.log

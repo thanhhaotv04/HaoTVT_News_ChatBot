@@ -87,6 +87,33 @@ def test_fetch_hot_articles_merges_feeds_and_limits(monkeypatch):
     assert len({a.link for a in articles}) == 3
 
 
+def test_fetch_hot_articles_raises_when_all_feeds_fail(monkeypatch):
+    def fail_fetch(*_args, **_kwargs):
+        raise requests.ConnectionError("blocked")
+
+    monkeypatch.setattr(bot, "fetch_articles_from_feed", fail_fetch)
+
+    with pytest.raises(RuntimeError, match="All RSS feeds failed"):
+        bot.fetch_hot_articles(limit=3, feed_keys=("tin-moi-nhat", "thoi-su"))
+
+
+def test_fetch_raw_uses_rss_request_headers(monkeypatch):
+    response = FakeResponse()
+    response.content = b"<rss><channel></channel></rss>"
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return response
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+
+    bot.fetch_vnexpress_latest_raw("https://example.com/feed.rss")
+
+    assert calls[0][1]["headers"] == bot.RSS_REQUEST_HEADERS
+    assert "HaoTVT-NewsBot" in calls[0][1]["headers"]["User-Agent"]
+
+
 def test_format_article_caption_escapes_html_and_respects_limit():
     article = bot.Article(
         title="A <hot> & important",
@@ -268,3 +295,39 @@ def test_main_reports_empty_feed_to_telegram(monkeypatch):
 
     assert bot.main() == 1
     assert messages == ["⚠️ Không tìm thấy tin nào trong 24h gần nhất"]
+
+
+def test_main_reports_rss_failure_instead_of_no_news(monkeypatch):
+    messages = []
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(
+        bot,
+        "fetch_hot_articles",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("all blocked")),
+    )
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
+
+    assert bot.main() == 1
+    assert messages == ["⚠️ Không thể tải nguồn tin lúc này. Bot sẽ thử lại ở lịch chạy tiếp theo."]
+
+
+def test_main_still_sends_article_when_gemini_fails(monkeypatch):
+    article = bot.Article("Tin mới", "https://example.com/news", summary="RSS summary")
+    sent_articles = []
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: [article])
+    monkeypatch.setattr(bot, "summarize_with_gemini", lambda *_args: None)
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **_kwargs: None)
+
+    def record_article(**kwargs):
+        sent_articles.append(kwargs)
+        return True
+
+    monkeypatch.setattr(bot, "send_article_to_telegram", record_article)
+
+    assert bot.main() == 0
+    assert sent_articles[0]["article"] == article
+    assert sent_articles[0]["ai_summary"] is None
