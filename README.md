@@ -1,6 +1,6 @@
 # HaoTVT News ChatBot
 
-Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h gan nhat, tom tat bang Gemini neu co API key, roi gui qua Telegram luc 6:00 sang moi ngay bang GitHub Actions.
+Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h gan nhat, tom tat bang Gemini neu co API key, roi gui qua Telegram luc 6:30 sang moi ngay bang GitHub Actions.
 
 ## Chuc nang
 
@@ -54,4 +54,4 @@ pytest -q
 
 ## Lich GitHub Actions
 
-Workflow `.github/workflows/daily_news.yml` chay luc `23:17 UTC`, tuong duong `06:17` gio Viet Nam ngay hom sau. Chon phut 17 de giam nguy co GitHub Actions tri hoan job vao dau moi gio; workflow cung co nut chay thu cong.
+Workflow `.github/workflows/daily_news.yml` chay luc `23:30 UTC`, tuong duong `06:30` gio Viet Nam ngay hom sau; workflow cung co nut chay thu cong.

@@ -3,8 +3,8 @@ name: Daily News Bot
 on:
   workflow_dispatch:
   schedule:
-    # Tránh phút 00 thường bị GitHub Actions trì hoãn do tải cao.
-    - cron: '17 23 * * *'
+    # 23:30 UTC tương đương 06:30 sáng hôm sau tại Việt Nam (UTC+7).
+    - cron: '30 23 * * *'
 
 jobs:
   send-news:
