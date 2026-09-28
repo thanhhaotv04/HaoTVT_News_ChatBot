@@ -36,7 +36,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ARTICLE_LOOKBACK_HOURS: 24
-          NEWS_ARTICLE_COUNT: 15
+          VIETNAM_NEWS_COUNT: 10
+          INTERNATIONAL_NEWS_COUNT: 5
+          TECHNOLOGY_NEWS_COUNT: 3
         run: |
           set -o pipefail
           python -u telegram_news_bot.py 2>&1 | tee bot.log

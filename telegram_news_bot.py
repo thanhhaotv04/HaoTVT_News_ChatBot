@@ -1,8 +1,8 @@
 """
-AI News Chatbot - Telegram Bot gửi tin tức VNExpress mỗi sáng
+AI News Chatbot - Telegram Bot gửi bản tin tổng hợp mỗi sáng
 
-Bot tự động lấy khoảng 15 tin nóng nhất trong 24h gần nhất và gửi qua
-Telegram lúc 6:00 sáng mỗi ngày bằng GitHub Actions.
+Bot tự động lấy tin Việt Nam, quốc tế và công nghệ trong 24h gần nhất,
+sau đó gửi qua Telegram mỗi sáng bằng GitHub Actions.
 
 Cấu hình:
   - TELEGRAM_BOT_TOKEN: Token bot từ @BotFather
@@ -46,17 +46,25 @@ VNEXPRESS_RSS_FEEDS = {
     "phap-luat": "https://vnexpress.net/rss/phap-luat.rss",
 }
 
-HOT_NEWS_FEED_KEYS = (
-    "tin-noi-bat",
-    "tin-moi-nhat",
+VIETNAM_NEWS_FEED_KEYS = (
     "thoi-su",
-    "the-gioi",
     "kinh-doanh",
-    "cong-nghe",
     "suc-khoe",
     "giao-duc",
     "phap-luat",
 )
+
+INTERNATIONAL_RSS_FEEDS = {
+    "BBC World": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "The Guardian World": "https://www.theguardian.com/world/rss",
+    "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
+}
+
+TECHNOLOGY_RSS_FEEDS = {
+    "BBC Technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+    "The Guardian Technology": "https://www.theguardian.com/technology/rss",
+    "TechCrunch": "https://techcrunch.com/feed/",
+}
 
 GEMINI_MODEL_FALLBACK = (
     "gemini-3.5-flash-lite",
@@ -266,10 +274,11 @@ class Article:
     published_at: datetime | None = None
     image_url: str | None = None
     summary: str = ""
+    source: str = ""
 
 
-def fetch_vnexpress_latest_raw(rss_url: str) -> feedparser.FeedParserDict:
-    """Lấy và parse RSS feed từ VNExpress."""
+def fetch_rss_raw(rss_url: str) -> feedparser.FeedParserDict:
+    """Tải và parse một RSS feed."""
     insecure = os.getenv("RSS_INSECURE", "").strip().lower() in {"1", "true", "yes"}
     try:
         r = requests.get(
@@ -287,6 +296,10 @@ def fetch_vnexpress_latest_raw(rss_url: str) -> feedparser.FeedParserDict:
     if getattr(feed, "bozo", False):
         raise RuntimeError(f"Failed to parse RSS XML: {getattr(feed, 'bozo_exception', 'unknown error')}")
     return feed
+
+
+# Giữ tên cũ để không làm hỏng mã đang import hàm này.
+fetch_vnexpress_latest_raw = fetch_rss_raw
 
 
 def _extract_image_url(entry) -> str | None:
@@ -378,7 +391,8 @@ def format_article_caption(
     link = ""
     if safe_link:
         escaped_link = html.escape(safe_link, quote=True)
-        candidate = f'\n\n<a href="{escaped_link}">🔗 Đọc bài gốc</a>'
+        source_label = f" · {_escape_html_text(article.source)}" if article.source else ""
+        candidate = f'\n\n<a href="{escaped_link}">🔗 Đọc bài gốc{source_label}</a>'
         if len(prefix) + len(suffix) + len(candidate) + 1 <= max_length:
             link = candidate
 
@@ -450,7 +464,7 @@ Cuối đoạn thêm dòng chữ in nghiêng: "<i>Lưu ý: Nhận định từ A
         max_output_tokens=600,
     )
 
-def _entry_to_article(entry) -> Article:
+def _entry_to_article(entry, *, source: str = "") -> Article:
     """Chuyển RSS entry thành Article object."""
     title = (getattr(entry, "title", "") or "").strip()
     link = (getattr(entry, "link", "") or "").strip()
@@ -464,7 +478,14 @@ def _entry_to_article(entry) -> Article:
 
     image_url = _extract_image_url(entry)
     summary = _extract_summary(entry)
-    return Article(title=title, link=link, published_at=dt_vn, image_url=image_url, summary=summary)
+    return Article(
+        title=title,
+        link=link,
+        published_at=dt_vn,
+        image_url=image_url,
+        summary=summary,
+        source=source,
+    )
 
 
 def _is_article_recent(article: Article, since: datetime | None) -> bool:
@@ -480,10 +501,13 @@ def fetch_articles_from_feed(
     limit: int = 3,
     *,
     since: datetime | None = None,
+    source: str = "",
 ) -> List[Article]:
     """Lấy tin từ một RSS feed cụ thể."""
-    feed = fetch_vnexpress_latest_raw(rss_url)
-    all_articles: List[Article] = [_entry_to_article(e) for e in getattr(feed, "entries", [])]
+    feed = fetch_rss_raw(rss_url)
+    all_articles: List[Article] = [
+        _entry_to_article(entry, source=source) for entry in getattr(feed, "entries", [])
+    ]
     all_articles = [a for a in all_articles if _is_article_recent(a, since)]
     all_articles.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=VN_TZ), reverse=True)
     all_articles = _dedupe_articles(all_articles)
@@ -536,9 +560,9 @@ def fetch_hot_articles(
     *,
     limit: int = 15,
     since: datetime | None = None,
-    feed_keys: tuple[str, ...] = HOT_NEWS_FEED_KEYS,
+    feed_keys: tuple[str, ...] = VIETNAM_NEWS_FEED_KEYS,
 ) -> List[Article]:
-    """Gom nhiều RSS feed, dedupe, rồi lấy các bài mới nhất trong ngày."""
+    """Gom các chuyên mục VNExpress trong nước và lấy bài mới nhất."""
     candidates: List[Article] = []
     per_feed_limit = max(limit, 20)
     successful_feeds = 0
@@ -547,12 +571,52 @@ def fetch_hot_articles(
     for key in feed_keys:
         rss_url = VNEXPRESS_RSS_FEEDS[key]
         try:
-            articles = fetch_articles_from_feed(rss_url, limit=per_feed_limit, since=since)
+            articles = fetch_articles_from_feed(
+                rss_url,
+                limit=per_feed_limit,
+                since=since,
+                source="VNExpress",
+            )
             successful_feeds += 1
             candidates.extend(articles)
             print(f"ℹ️ RSS {key}: {len(articles)} recent articles")
         except Exception as exc:
             failure = f"{key}: {type(exc).__name__}: {exc}"
+            failures.append(failure)
+            print(f"⚠️ Failed to fetch feed {failure}")
+
+    if successful_feeds == 0:
+        raise RuntimeError("All RSS feeds failed: " + "; ".join(failures))
+
+    candidates.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=VN_TZ), reverse=True)
+    return _dedupe_articles(candidates)[:limit]
+
+
+def fetch_articles_from_sources(
+    feeds: dict[str, str],
+    *,
+    limit: int,
+    since: datetime | None = None,
+) -> List[Article]:
+    """Gom, sắp xếp và loại bài trùng từ nhiều nguồn RSS."""
+    candidates: List[Article] = []
+    successful_feeds = 0
+    failures: List[str] = []
+    per_feed_limit = max(limit, 10)
+
+    for source, rss_url in feeds.items():
+        try:
+            articles = fetch_articles_from_feed(
+                rss_url,
+                limit=per_feed_limit,
+                since=since,
+                source=source,
+            )
+            successful_feeds += 1
+            candidates.extend(articles)
+            print(f"ℹ️ RSS {source}: {len(articles)} recent articles")
+        except Exception as exc:
+            failure = f"{source}: {type(exc).__name__}: {exc}"
             failures.append(failure)
             print(f"⚠️ Failed to fetch feed {failure}")
 
@@ -649,20 +713,52 @@ def main() -> int:
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     lookback_hours = _env_int("ARTICLE_LOOKBACK_HOURS", 24)
-    news_article_count = _env_int("NEWS_ARTICLE_COUNT", 15)
+    vietnam_news_count = _env_int("VIETNAM_NEWS_COUNT", 10)
+    international_news_count = _env_int("INTERNATIONAL_NEWS_COUNT", 5)
+    technology_news_count = _env_int("TECHNOLOGY_NEWS_COUNT", 3)
     now_vn = datetime.now(VN_TZ)
     since_vn = now_vn - timedelta(hours=lookback_hours)
 
-    try:
-        articles = fetch_hot_articles(limit=news_article_count, since=since_vn)
-    except RuntimeError as exc:
-        print(f"❌ Không thể tải nguồn tin: {exc}")
+    section_specs = (
+        ("🇻🇳 Tin Việt Nam", vietnam_news_count, lambda: fetch_hot_articles(limit=vietnam_news_count, since=since_vn)),
+        (
+            "🌍 Tin quốc tế",
+            international_news_count,
+            lambda: fetch_articles_from_sources(
+                INTERNATIONAL_RSS_FEEDS,
+                limit=international_news_count,
+                since=since_vn,
+            ),
+        ),
+        (
+            "💻 Tin công nghệ",
+            technology_news_count,
+            lambda: fetch_articles_from_sources(
+                TECHNOLOGY_RSS_FEEDS,
+                limit=technology_news_count,
+                since=since_vn,
+            ),
+        ),
+    )
+    sections: List[tuple[str, int, List[Article]]] = []
+    fetch_failures = 0
+    for title, requested_count, loader in section_specs:
+        try:
+            sections.append((title, requested_count, loader()))
+        except RuntimeError as exc:
+            fetch_failures += 1
+            sections.append((title, requested_count, []))
+            print(f"❌ Không thể tải {title}: {exc}")
+
+    total_articles = sum(len(articles) for _, _, articles in sections)
+    if not total_articles:
+        if fetch_failures == len(section_specs):
+            message = "⚠️ Không thể tải nguồn tin lúc này. Bot sẽ thử lại ở lịch chạy tiếp theo."
+        else:
+            message = f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất"
+        print(message)
         if token and chat_id:
-            send_telegram_message(
-                token=token,
-                chat_id=chat_id,
-                text="⚠️ Không thể tải nguồn tin lúc này. Bot sẽ thử lại ở lịch chạy tiếp theo.",
-            )
+            send_telegram_message(token=token, chat_id=chat_id, text=message)
         return 1
 
     if not token or not chat_id:
@@ -672,47 +768,70 @@ def main() -> int:
             "Set these env vars (hoặc GitHub Secrets) để bot gửi tin."
         )
         # Preview mà không gửi Telegram.
-        print(f"\n📰 Preview - {len(articles)} tin nóng trong {lookback_hours}h gần nhất:")
-        for i, a in enumerate(articles, 1):
-            published = a.published_at.strftime("%d/%m %H:%M") if a.published_at else "không rõ giờ"
-            print(f"{i}. [{published}] {a.title}")
-            if a.summary:
-                print(f"   {a.summary[:100]}...")
-        return 0
-
-    if not articles:
-        message = f"⚠️ Không tìm thấy tin nào trong {lookback_hours}h gần nhất"
-        print(message)
-        send_telegram_message(token=token, chat_id=chat_id, text=message)
-        return 1
+        print(f"\n📰 Preview - {total_articles} tin trong {lookback_hours}h gần nhất:")
+        for title, requested_count, articles in sections:
+            print(f"\n{title} ({len(articles)}/{requested_count})")
+            for i, article in enumerate(articles, 1):
+                published = (
+                    article.published_at.strftime("%d/%m %H:%M")
+                    if article.published_at
+                    else "không rõ giờ"
+                )
+                print(f"{i}. [{published}] {article.title} — {article.source}")
+                if article.summary:
+                    print(f"   {article.summary[:100]}...")
+        return 1 if fetch_failures else 0
 
     today = now_vn.date()
-    header_msg = f"📰 <b>{len(articles)} tin tức nóng nhất trong {lookback_hours}h qua</b> - {today.strftime('%d/%m/%Y')}\n"
+    header_msg = (
+        f"📰 <b>Bản tin tổng hợp · {total_articles} tin trong {lookback_hours}h qua</b>"
+        f" - {today.strftime('%d/%m/%Y')}\n"
+    )
     if gemini_api_key:
         header_msg += "🤖 Đã bật tóm tắt AI bằng Gemini\n"
     send_telegram_message(token=token, chat_id=chat_id, text=header_msg)
 
     sent_total = 0
+    incomplete_sections = 0
+    gemini_enabled = bool(gemini_api_key)
 
-    for i, article in enumerate(articles, start=1):
-        try:
-            ai_summary = None
-            if gemini_api_key:
-                ai_summary = summarize_with_gemini(article, gemini_api_key)
+    for title, requested_count, articles in sections:
+        if not articles:
+            incomplete_sections += 1
+            continue
+        if len(articles) < requested_count:
+            incomplete_sections += 1
+        send_telegram_message(
+            token=token,
+            chat_id=chat_id,
+            text=f"<b>{title} · {len(articles)} tin</b>",
+        )
+        for i, article in enumerate(articles, start=1):
+            try:
+                ai_summary = None
+                if gemini_enabled and gemini_api_key:
+                    ai_summary = summarize_with_gemini(article, gemini_api_key)
+                    if ai_summary is None:
+                        gemini_enabled = False
+                        print("⚠️ Gemini unavailable; using RSS summaries for remaining articles")
 
-            if send_article_to_telegram(
-                token=token,
-                chat_id=chat_id,
-                article=article,
-                index=i,
-                ai_summary=ai_summary,
-            ):
-                sent_total += 1
-        except Exception as e:
-            print(f"⚠️ Failed to send hot article #{i}: {_safe_error(e, token, gemini_api_key)}")
+                if send_article_to_telegram(
+                    token=token,
+                    chat_id=chat_id,
+                    article=article,
+                    index=i,
+                    ai_summary=ai_summary,
+                ):
+                    sent_total += 1
+            except Exception as exc:
+                print(
+                    f"⚠️ Failed to send {title} article #{i}: "
+                    f"{_safe_error(exc, token, gemini_api_key)}"
+                )
 
-    print(f"✅ Sent {sent_total}/{len(articles)} articles to Telegram.")
-    return 0 if sent_total == len(articles) else 1
+    print(f"✅ Sent {sent_total}/{total_articles} articles to Telegram.")
+    complete = sent_total == total_articles and not fetch_failures and not incomplete_sections
+    return 0 if complete else 1
 
 
 if __name__ == "__main__":

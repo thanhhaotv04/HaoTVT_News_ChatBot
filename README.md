@@ -1,13 +1,15 @@
 # HaoTVT News ChatBot
 
-Bot Python lay tin moi tu RSS VNExpress, loc khoang 15 tin nong nhat trong 24h gan nhat, tom tat bang Gemini neu co API key, roi gui qua Telegram luc 6:00 sang moi ngay bang GitHub Actions.
+Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h gan nhat, tom tat bang Gemini neu co API key, roi gui qua Telegram luc 6:00 sang moi ngay bang GitHub Actions.
 
 ## Chuc nang
 
 - Loc tin theo khung thoi gian `ARTICLE_LOOKBACK_HOURS`, mac dinh 24h.
-- Gui mot danh sach `NEWS_ARTICLE_COUNT`, mac dinh 15 tin.
-- Gom ung vien tu feed `tin-moi-nhat` va cac chuyen muc quan trong.
+- Gui ba muc rieng: `VIETNAM_NEWS_COUNT=10`, `INTERNATIONAL_NEWS_COUNT=5`, `TECHNOLOGY_NEWS_COUNT=3`.
+- Tin Viet Nam lay tu cac chuyen muc trong nuoc cua VNExpress; tin quoc te lay tu BBC World, The Guardian World va Al Jazeera.
+- Tin cong nghe lay tu BBC Technology, The Guardian Technology va TechCrunch.
 - Tu dong dedupe URL va uu tien bai co thoi gian dang moi nhat.
+- Moi bai hien thi ro nguon; mot nguon loi khong lam mat cac muc tin con lai.
 - Gui anh kem caption neu co anh RSS; neu anh loi thi fallback sang tin nhan text.
 - Escape HTML va cat noi dung theo gioi han Telegram de tranh loi `parse_mode=HTML`.
 - Moi tin co link `Doc bai goc`, ke ca khi RSS khong co anh.
@@ -26,7 +28,9 @@ Tao GitHub Secrets:
 Bien moi truong tuy chon:
 
 - `ARTICLE_LOOKBACK_HOURS=24`
-- `NEWS_ARTICLE_COUNT=15`
+- `VIETNAM_NEWS_COUNT=10`
+- `INTERNATIONAL_NEWS_COUNT=5`
+- `TECHNOLOGY_NEWS_COUNT=3`
 - `RSS_INSECURE=1` chi dung khi moi truong local bi loi SSL proxy
 - `GEMINI_MODEL=gemini-3.5-flash-lite` de uu tien model tuy chon truoc danh sach fallback
 

@@ -45,12 +45,18 @@ def test_fetch_articles_filters_last_24h_sorts_and_dedupes(monkeypatch):
         _entry("newest", "https://example.com/b", now - timedelta(minutes=20)),
         _entry("duplicate newest", "https://example.com/a", now - timedelta(minutes=10)),
     ]
-    monkeypatch.setattr(bot, "fetch_vnexpress_latest_raw", lambda _url: SimpleNamespace(entries=entries))
+    monkeypatch.setattr(bot, "fetch_rss_raw", lambda _url: SimpleNamespace(entries=entries))
 
-    articles = bot.fetch_articles_from_feed("https://rss.test", limit=5, since=since)
+    articles = bot.fetch_articles_from_feed(
+        "https://rss.test",
+        limit=5,
+        since=since,
+        source="Test News",
+    )
 
     assert [a.title for a in articles] == ["duplicate newest", "newest"]
     assert all(a.published_at and a.published_at >= since for a in articles)
+    assert all(a.source == "Test News" for a in articles)
 
 
 def test_fetch_hot_articles_merges_feeds_and_limits(monkeypatch):
@@ -71,9 +77,13 @@ def test_fetch_hot_articles_merges_feeds_and_limits(monkeypatch):
         ],
     }
 
-    def fake_fetch(rss_url, limit=3, *, since=None):
+    def fake_fetch(rss_url, limit=3, *, since=None, source=""):
         articles = feed_articles[rss_url]
-        return [a for a in articles if since is None or (a.published_at and a.published_at >= since)][:limit]
+        recent = [a for a in articles if since is None or (a.published_at and a.published_at >= since)]
+        return [
+            bot.Article(a.title, a.link, a.published_at, a.image_url, a.summary, source)
+            for a in recent[:limit]
+        ]
 
     monkeypatch.setattr(bot, "fetch_articles_from_feed", fake_fetch)
 
@@ -85,6 +95,7 @@ def test_fetch_hot_articles_merges_feeds_and_limits(monkeypatch):
 
     assert [a.title for a in articles] == ["A", "B", "C"]
     assert len({a.link for a in articles}) == 3
+    assert all(a.source == "VNExpress" for a in articles)
 
 
 def test_fetch_hot_articles_raises_when_all_feeds_fail(monkeypatch):
@@ -95,6 +106,40 @@ def test_fetch_hot_articles_raises_when_all_feeds_fail(monkeypatch):
 
     with pytest.raises(RuntimeError, match="All RSS feeds failed"):
         bot.fetch_hot_articles(limit=3, feed_keys=("tin-moi-nhat", "thoi-su"))
+
+
+def test_fetch_articles_from_sources_merges_sorts_dedupes_and_labels(monkeypatch):
+    now = datetime(2026, 8, 9, 6, 0, tzinfo=bot.VN_TZ)
+    feeds = {"BBC World": "https://rss.test/bbc", "The Guardian": "https://rss.test/guardian"}
+    feed_articles = {
+        "https://rss.test/bbc": [
+            bot.Article("Newest", "https://example.com/new", now - timedelta(minutes=1)),
+            bot.Article("Duplicate", "https://example.com/shared", now - timedelta(minutes=3)),
+        ],
+        "https://rss.test/guardian": [
+            bot.Article("Middle", "https://example.com/middle", now - timedelta(minutes=2)),
+            bot.Article("Duplicate newer", "https://example.com/shared", now - timedelta(minutes=1)),
+        ],
+    }
+
+    def fake_fetch(rss_url, limit=3, *, since=None, source=""):
+        return [
+            bot.Article(a.title, a.link, a.published_at, a.image_url, a.summary, source)
+            for a in feed_articles[rss_url][:limit]
+            if since is None or (a.published_at and a.published_at >= since)
+        ]
+
+    monkeypatch.setattr(bot, "fetch_articles_from_feed", fake_fetch)
+
+    articles = bot.fetch_articles_from_sources(
+        feeds,
+        limit=3,
+        since=now - timedelta(hours=24),
+    )
+
+    assert [a.title for a in articles] == ["Newest", "Duplicate newer", "Middle"]
+    assert [a.source for a in articles] == ["BBC World", "The Guardian", "The Guardian"]
+    assert len({a.link for a in articles}) == 3
 
 
 def test_fetch_raw_uses_rss_request_headers(monkeypatch):
@@ -130,7 +175,12 @@ def test_format_article_caption_escapes_html_and_respects_limit():
 
 
 def test_format_article_caption_keeps_valid_html_and_adds_source_link():
-    article = bot.Article("x" * 120, "https://example.com/a?x=1&y=2", summary="A & B")
+    article = bot.Article(
+        "x" * 120,
+        "https://example.com/a?x=1&y=2",
+        summary="A & B",
+        source="BBC <World>",
+    )
 
     short_caption = bot.format_article_caption(article, 1, max_length=40)
     full_caption = bot.format_article_caption(article, 1, max_length=300)
@@ -139,6 +189,7 @@ def test_format_article_caption_keeps_valid_html_and_adds_source_link():
     assert short_caption.startswith("<b>1. ") and short_caption.endswith("</b>")
     assert '<a href="https://example.com/a?x=1&amp;y=2">' in full_caption
     assert "🔗 Đọc bài gốc" in full_caption
+    assert "BBC &lt;World&gt;" in full_caption
 
 
 def test_extract_summary_decodes_html_entities():
@@ -268,8 +319,16 @@ def test_main_uses_actual_article_count_and_reports_partial_failure(monkeypatch,
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setenv("VIETNAM_NEWS_COUNT", "2")
+    monkeypatch.setenv("INTERNATIONAL_NEWS_COUNT", "1")
+    monkeypatch.setenv("TECHNOLOGY_NEWS_COUNT", "1")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: articles)
+    monkeypatch.setattr(
+        bot,
+        "fetch_articles_from_sources",
+        lambda feeds, **_kwargs: [bot.Article("Foreign", next(iter(feeds.values())))],
+    )
     monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
 
     def send_article(**_kwargs):
@@ -282,8 +341,57 @@ def test_main_uses_actual_article_count_and_reports_partial_failure(monkeypatch,
     monkeypatch.setattr(bot, "send_article_to_telegram", send_article)
 
     assert bot.main() == 1
-    assert "<b>2 tin tức" in messages[0]
+    assert "Bản tin tổng hợp · 4 tin" in messages[0]
     assert token not in capsys.readouterr().out
+
+
+def test_main_sends_requested_three_sections(monkeypatch):
+    messages = []
+    sent_articles = []
+
+    def make_articles(prefix, count, source):
+        return [
+            bot.Article(
+                f"{prefix} {index}",
+                f"https://example.com/{prefix.lower()}/{index}",
+                source=source,
+            )
+            for index in range(1, count + 1)
+        ]
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("VIETNAM_NEWS_COUNT", raising=False)
+    monkeypatch.delenv("INTERNATIONAL_NEWS_COUNT", raising=False)
+    monkeypatch.delenv("TECHNOLOGY_NEWS_COUNT", raising=False)
+    monkeypatch.setattr(
+        bot,
+        "fetch_hot_articles",
+        lambda **_kwargs: make_articles("VN", 10, "VNExpress"),
+    )
+
+    def fetch_sources(feeds, **_kwargs):
+        if feeds is bot.INTERNATIONAL_RSS_FEEDS:
+            return make_articles("World", 5, "BBC World")
+        return make_articles("Tech", 3, "BBC Technology")
+
+    monkeypatch.setattr(bot, "fetch_articles_from_sources", fetch_sources)
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
+    monkeypatch.setattr(
+        bot,
+        "send_article_to_telegram",
+        lambda **kwargs: sent_articles.append((kwargs["article"], kwargs["index"])) or True,
+    )
+
+    assert bot.main() == 0
+    assert "Bản tin tổng hợp · 18 tin" in messages[0]
+    assert messages[1:] == [
+        "<b>🇻🇳 Tin Việt Nam · 10 tin</b>",
+        "<b>🌍 Tin quốc tế · 5 tin</b>",
+        "<b>💻 Tin công nghệ · 3 tin</b>",
+    ]
+    assert [index for _, index in sent_articles] == [*range(1, 11), *range(1, 6), *range(1, 4)]
 
 
 def test_main_reports_empty_feed_to_telegram(monkeypatch):
@@ -291,6 +399,7 @@ def test_main_reports_empty_feed_to_telegram(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
     monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: [])
+    monkeypatch.setattr(bot, "fetch_articles_from_sources", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
 
     assert bot.main() == 1
@@ -306,6 +415,11 @@ def test_main_reports_rss_failure_instead_of_no_news(monkeypatch):
         "fetch_hot_articles",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("all blocked")),
     )
+    monkeypatch.setattr(
+        bot,
+        "fetch_articles_from_sources",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("all blocked")),
+    )
     monkeypatch.setattr(bot, "send_telegram_message", lambda **kwargs: messages.append(kwargs["text"]))
 
     assert bot.main() == 1
@@ -315,11 +429,21 @@ def test_main_reports_rss_failure_instead_of_no_news(monkeypatch):
 def test_main_still_sends_article_when_gemini_fails(monkeypatch):
     article = bot.Article("Tin mới", "https://example.com/news", summary="RSS summary")
     sent_articles = []
+    gemini_calls = 0
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("VIETNAM_NEWS_COUNT", "1")
+    monkeypatch.setenv("INTERNATIONAL_NEWS_COUNT", "1")
+    monkeypatch.setenv("TECHNOLOGY_NEWS_COUNT", "1")
     monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: [article])
-    monkeypatch.setattr(bot, "summarize_with_gemini", lambda *_args: None)
+    monkeypatch.setattr(bot, "fetch_articles_from_sources", lambda *_args, **_kwargs: [article])
+    def fail_gemini(*_args):
+        nonlocal gemini_calls
+        gemini_calls += 1
+        return None
+
+    monkeypatch.setattr(bot, "summarize_with_gemini", fail_gemini)
     monkeypatch.setattr(bot, "send_telegram_message", lambda **_kwargs: None)
 
     def record_article(**kwargs):
@@ -329,5 +453,7 @@ def test_main_still_sends_article_when_gemini_fails(monkeypatch):
     monkeypatch.setattr(bot, "send_article_to_telegram", record_article)
 
     assert bot.main() == 0
-    assert sent_articles[0]["article"] == article
-    assert sent_articles[0]["ai_summary"] is None
+    assert len(sent_articles) == 3
+    assert gemini_calls == 1
+    assert all(item["article"] == article for item in sent_articles)
+    assert all(item["ai_summary"] is None for item in sent_articles)
