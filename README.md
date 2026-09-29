@@ -13,7 +13,7 @@ Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h 
 - Gui anh kem caption neu co anh RSS; neu anh loi thi fallback sang tin nhan text.
 - Escape HTML va cat noi dung theo gioi han Telegram de tranh loi `parse_mode=HTML`.
 - Moi tin co link `Doc bai goc`, ke ca khi RSS khong co anh.
-- Gemini co fallback model de bot van chay khi mot model bi quota/khong kha dung.
+- Gemini tom tat theo tung section (toi da 3 request thay vi 18), co fallback model va fallback RSS khi AI loi.
 - Che token/API key trong log loi va bao loi workflow neu gui thieu tin.
 - GitHub Actions chay test truoc khi gui tin.
 
@@ -54,4 +54,4 @@ pytest -q
 
 ## Lich GitHub Actions
 
-Workflow `.github/workflows/daily_news.yml` chay luc `23:30 UTC`, tuong duong `06:30` gio Viet Nam ngay hom sau; workflow cung co nut chay thu cong.
+Workflow uu tien chay luc `06:30` gio Viet Nam. Hai moc `06:40` va `06:50` la du phong neu GitHub bo mot scheduled run; delivery marker va concurrency dam bao bot chi gui mot lan moi ngay. Nut chay thu cong luon cho phep gui lai khi can.

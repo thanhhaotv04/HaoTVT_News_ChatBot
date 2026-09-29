@@ -1,0 +1,12 @@
+name: Daily News Backup
+
+on:
+  schedule:
+    # Workflow riêng để dự phòng nếu GitHub bỏ lượt 06:30 của workflow chính.
+    - cron: '40 23 * * *'
+    - cron: '50 23 * * *'
+
+jobs:
+  send-news-backup:
+    uses: ./.github/workflows/daily_news.yml
+    secrets: inherit

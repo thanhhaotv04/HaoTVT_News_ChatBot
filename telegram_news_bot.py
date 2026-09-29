@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import html
+import json
 import os
 import re
 import sys
@@ -343,36 +344,68 @@ def _extract_summary(entry) -> str:
             summary = summary[:300] + "..."
     return summary
 
-def summarize_with_gemini(article: Article, api_key: str) -> str | None:
-    """
-    Dùng Gemini để tóm tắt bài báo.
-    Trả về None nếu lỗi hoặc không có API key.
-    """
-    if not api_key:
+
+def _parse_section_summaries(text: str, article_count: int) -> dict[int, str] | None:
+    """Đọc JSON Gemini; mục thiếu sẽ tự fallback về summary RSS."""
+    start = text.find("[")
+    end = text.rfind("]")
+    if start < 0 or end <= start:
         return None
-    
-    # Chuẩn bị prompt với thông tin từ RSS
-    prompt = f"""Bạn là một AI chuyên tóm tắt tin tức tiếng Việt. 
-Hãy tóm tắt ngắn gọn bài báo sau đây trong 2-3 câu, tập trung vào thông tin quan trọng nhất.
+    try:
+        payload = json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, list):
+        return None
 
-Tiêu đề: {article.title}
+    summaries: dict[int, str] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        summary = item.get("summary")
+        if (
+            isinstance(index, int)
+            and 1 <= index <= article_count
+            and index not in summaries
+            and isinstance(summary, str)
+            and summary.strip()
+        ):
+            summaries[index] = summary.strip()
+    return summaries or None
 
-Nội dung từ RSS: {article.summary if article.summary else "Không có nội dung chi tiết"}
 
-Yêu cầu:
-- Tóm tắt ngắn gọn, súc tích (2-3 câu, khoảng 100-200 từ)
-- Giữ nguyên thông tin quan trọng và sự kiện chính
-- Viết bằng tiếng Việt
-- Không thêm ý kiến cá nhân hoặc thông tin không có trong bài
-- Loại bỏ các từ ngữ không cần thiết
-"""
+def summarize_section_with_gemini(
+    section_title: str,
+    articles: List[Article],
+    api_key: str,
+) -> dict[int, str] | None:
+    """Tóm tắt cả section trong một request để giảm token và số lần gọi API."""
+    if not api_key or not articles:
+        return None
 
-    return _generate_gemini_text(
+    items = [
+        {
+            "index": index,
+            "title": article.title[:180],
+            "content": (article.summary or "Không có mô tả RSS")[:320],
+        }
+        for index, article in enumerate(articles, start=1)
+    ]
+    compact_items = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+    prompt = f"""Tóm tắt từng tin trong section {section_title} bằng tiếng Việt.
+Mỗi tóm tắt 1-2 câu, tối đa 45 từ, chỉ dùng dữ kiện được cung cấp.
+Chỉ trả về JSON hợp lệ dạng [{{"index":1,"summary":"..."}}], không Markdown.
+Dữ liệu: {compact_items}"""
+
+    text = _generate_gemini_text(
         prompt=prompt,
         api_key=api_key,
-        temperature=0.3,
-        max_output_tokens=250,
+        temperature=0.2,
+        max_output_tokens=min(800, max(192, len(articles) * 80)),
     )
+    return _parse_section_summaries(text, len(articles)) if text else None
+
 
 def format_article_caption(
     article: Article,
@@ -806,21 +839,23 @@ def main() -> int:
             chat_id=chat_id,
             text=f"<b>{title} · {len(articles)} tin</b>",
         )
+        section_summaries: dict[int, str] = {}
+        if gemini_enabled and gemini_api_key:
+            generated = summarize_section_with_gemini(title, articles, gemini_api_key)
+            if generated is None:
+                gemini_enabled = False
+                print("⚠️ Gemini unavailable; using RSS summaries for remaining sections")
+            else:
+                section_summaries = generated
+
         for i, article in enumerate(articles, start=1):
             try:
-                ai_summary = None
-                if gemini_enabled and gemini_api_key:
-                    ai_summary = summarize_with_gemini(article, gemini_api_key)
-                    if ai_summary is None:
-                        gemini_enabled = False
-                        print("⚠️ Gemini unavailable; using RSS summaries for remaining articles")
-
                 if send_article_to_telegram(
                     token=token,
                     chat_id=chat_id,
                     article=article,
                     index=i,
-                    ai_summary=ai_summary,
+                    ai_summary=section_summaries.get(i),
                 ):
                     sent_total += 1
             except Exception as exc:

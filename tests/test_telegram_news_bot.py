@@ -293,6 +293,35 @@ def test_generate_gemini_text_redacts_api_key_from_errors(monkeypatch, capsys):
     assert "<redacted>" in output
 
 
+def test_summarize_section_batches_articles_and_parses_json(monkeypatch):
+    calls = []
+    articles = [
+        bot.Article("Tin 1", "https://example.com/1", summary="Nội dung 1"),
+        bot.Article("Tin 2", "https://example.com/2", summary="Nội dung 2"),
+    ]
+
+    def fake_generate(**kwargs):
+        calls.append(kwargs)
+        return '```json\n[{"index":1,"summary":"Tóm tắt 1"},{"index":2,"summary":"Tóm tắt 2"}]\n```'
+
+    monkeypatch.setattr(bot, "_generate_gemini_text", fake_generate)
+
+    summaries = bot.summarize_section_with_gemini("Tin Việt Nam", articles, "key")
+
+    assert summaries == {1: "Tóm tắt 1", 2: "Tóm tắt 2"}
+    assert len(calls) == 1
+    assert calls[0]["max_output_tokens"] == 192
+    assert '"index":1' in calls[0]["prompt"]
+    assert "tối đa 45 từ" in calls[0]["prompt"]
+
+
+def test_parse_section_summaries_keeps_valid_items_for_rss_fallback():
+    text = '[{"index":2,"summary":"Hợp lệ"},{"index":9,"summary":"Ngoài phạm vi"},{"index":1}]'
+
+    assert bot._parse_section_summaries(text, 2) == {2: "Hợp lệ"}
+    assert bot._parse_section_summaries("not json", 2) is None
+
+
 def test_telegram_exception_does_not_expose_token(monkeypatch):
     token = "123456:secret-token"
 
@@ -426,6 +455,55 @@ def test_main_reports_rss_failure_instead_of_no_news(monkeypatch):
     assert messages == ["⚠️ Không thể tải nguồn tin lúc này. Bot sẽ thử lại ở lịch chạy tiếp theo."]
 
 
+def test_main_batches_gemini_once_per_section(monkeypatch):
+    gemini_calls = []
+    sent_articles = []
+
+    def make_articles(prefix, count):
+        return [
+            bot.Article(f"{prefix} {index}", f"https://example.com/{prefix}/{index}")
+            for index in range(1, count + 1)
+        ]
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("VIETNAM_NEWS_COUNT", "2")
+    monkeypatch.setenv("INTERNATIONAL_NEWS_COUNT", "1")
+    monkeypatch.setenv("TECHNOLOGY_NEWS_COUNT", "1")
+    monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: make_articles("vn", 2))
+    monkeypatch.setattr(
+        bot,
+        "fetch_articles_from_sources",
+        lambda feeds, **_kwargs: make_articles("world" if feeds is bot.INTERNATIONAL_RSS_FEEDS else "tech", 1),
+    )
+
+    def summarize_section(title, articles, _api_key):
+        gemini_calls.append((title, len(articles)))
+        return {index: f"AI {title} {index}" for index in range(1, len(articles) + 1)}
+
+    monkeypatch.setattr(bot, "summarize_section_with_gemini", summarize_section)
+    monkeypatch.setattr(bot, "send_telegram_message", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        bot,
+        "send_article_to_telegram",
+        lambda **kwargs: sent_articles.append(kwargs) or True,
+    )
+
+    assert bot.main() == 0
+    assert gemini_calls == [
+        ("🇻🇳 Tin Việt Nam", 2),
+        ("🌍 Tin quốc tế", 1),
+        ("💻 Tin công nghệ", 1),
+    ]
+    assert [item["ai_summary"] for item in sent_articles] == [
+        "AI 🇻🇳 Tin Việt Nam 1",
+        "AI 🇻🇳 Tin Việt Nam 2",
+        "AI 🌍 Tin quốc tế 1",
+        "AI 💻 Tin công nghệ 1",
+    ]
+
+
 def test_main_still_sends_article_when_gemini_fails(monkeypatch):
     article = bot.Article("Tin mới", "https://example.com/news", summary="RSS summary")
     sent_articles = []
@@ -438,12 +516,13 @@ def test_main_still_sends_article_when_gemini_fails(monkeypatch):
     monkeypatch.setenv("TECHNOLOGY_NEWS_COUNT", "1")
     monkeypatch.setattr(bot, "fetch_hot_articles", lambda **_kwargs: [article])
     monkeypatch.setattr(bot, "fetch_articles_from_sources", lambda *_args, **_kwargs: [article])
+
     def fail_gemini(*_args):
         nonlocal gemini_calls
         gemini_calls += 1
         return None
 
-    monkeypatch.setattr(bot, "summarize_with_gemini", fail_gemini)
+    monkeypatch.setattr(bot, "summarize_section_with_gemini", fail_gemini)
     monkeypatch.setattr(bot, "send_telegram_message", lambda **_kwargs: None)
 
     def record_article(**kwargs):

@@ -2,9 +2,14 @@ name: Daily News Bot
 
 on:
   workflow_dispatch:
+  workflow_call:
   schedule:
-    # 23:30 UTC tương đương 06:30 sáng hôm sau tại Việt Nam (UTC+7).
+    # Lượt chính: 06:30 Việt Nam (UTC+7).
     - cron: '30 23 * * *'
+
+concurrency:
+  group: daily-news-delivery
+  cancel-in-progress: false
 
 jobs:
   send-news:
@@ -29,8 +34,21 @@ jobs:
       - name: Run tests
         run: |
           pytest -q
+
+      - name: Get Vietnam delivery date
+        id: delivery-date
+        run: echo "date=$(TZ=Asia/Ho_Chi_Minh date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore daily delivery marker
+        if: github.event_name == 'schedule'
+        id: delivery-cache
+        uses: actions/cache@v4
+        with:
+          path: .daily-news-sent
+          key: daily-news-sent-${{ steps.delivery-date.outputs.date }}
       
       - name: Run news bot
+        if: github.event_name == 'workflow_dispatch' || steps.delivery-cache.outputs.cache-hit != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -42,6 +60,11 @@ jobs:
         run: |
           set -o pipefail
           python -u telegram_news_bot.py 2>&1 | tee bot.log
+          touch .daily-news-sent
+
+      - name: Report duplicate schedule
+        if: github.event_name == 'schedule' && steps.delivery-cache.outputs.cache-hit == 'true'
+        run: echo "News was already delivered today; skipping this backup run."
       
       - name: Upload logs on failure
         if: failure()
