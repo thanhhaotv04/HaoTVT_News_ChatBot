@@ -8,12 +8,13 @@ Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h 
 - Gui ba muc rieng: `VIETNAM_NEWS_COUNT=10`, `INTERNATIONAL_NEWS_COUNT=5`, `TECHNOLOGY_NEWS_COUNT=3`.
 - Tin Viet Nam lay tu cac chuyen muc trong nuoc cua VNExpress; tin quoc te lay tu BBC World, The Guardian World va Al Jazeera.
 - Tin cong nghe lay tu BBC Technology, The Guardian Technology va TechCrunch.
+- Tin quoc te va cong nghe chi chon bai co anh RSS; ho tro `media:thumbnail`, `media:content`, enclosure va anh trong HTML.
 - Tu dong dedupe URL va uu tien bai co thoi gian dang moi nhat.
 - Moi bai hien thi ro nguon; mot nguon loi khong lam mat cac muc tin con lai.
 - Gui anh kem caption neu co anh RSS; neu anh loi thi fallback sang tin nhan text.
 - Escape HTML va cat noi dung theo gioi han Telegram de tranh loi `parse_mode=HTML`.
 - Moi tin co link `Doc bai goc`, ke ca khi RSS khong co anh.
-- Gemini tom tat theo tung section (toi da 3 request thay vi 18), co fallback model va fallback RSS khi AI loi.
+- Gemini tom tat ngan theo tung section (toi da 3 request thay vi 18), co fallback model va fallback RSS khi AI loi.
 - Che token/API key trong log loi va bao loi workflow neu gui thieu tin.
 - GitHub Actions chay test truoc khi gui tin.
 

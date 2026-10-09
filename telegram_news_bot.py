@@ -74,6 +74,7 @@ GEMINI_MODEL_FALLBACK = (
 )
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
+ARTICLE_SUMMARY_LIMIT = 280
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 MAX_RETRY_DELAY_SECONDS = 60
 RSS_REQUEST_HEADERS = {
@@ -315,11 +316,41 @@ def _extract_image_url(entry) -> str | None:
                 if href:
                     return href
 
-    # Ưu tiên 2: Parse từ summary HTML (tìm thẻ <img>)
-    summary = getattr(entry, "summary", "") or ""
-    if summary:
-        # Tìm pattern <img src="...">
-        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary, re.IGNORECASE)
+    # BBC dùng media:thumbnail; Guardian dùng nhiều media:content theo kích thước.
+    for field in ("media_content", "media_thumbnail"):
+        candidates: list[tuple[int, str]] = []
+        for media in getattr(entry, field, []) or []:
+            if not isinstance(media, dict):
+                continue
+            media_type = str(media.get("type", "")).lower()
+            if media_type and not media_type.startswith("image/"):
+                continue
+            url = _safe_http_url(media.get("url") or media.get("href"))
+            if not url:
+                continue
+            try:
+                width = int(media.get("width", 0))
+            except (TypeError, ValueError):
+                width = 0
+            candidates.append((width, url))
+        if candidates:
+            return max(candidates, key=lambda item: item[0])[1]
+
+    image = getattr(entry, "image", None)
+    if isinstance(image, dict):
+        image_url = _safe_http_url(image.get("href") or image.get("url"))
+        if image_url:
+            return image_url
+
+    # Cuối cùng, tìm <img> trong summary hoặc content:encoded.
+    html_parts = [getattr(entry, "summary", "") or ""]
+    html_parts.extend(
+        item.get("value", "")
+        for item in (getattr(entry, "content", []) or [])
+        if isinstance(item, dict)
+    )
+    for content in html_parts:
+        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
         if img_match:
             img_url = _safe_http_url(html.unescape(img_match.group(1)))
             if img_url:
@@ -340,8 +371,8 @@ def _extract_summary(entry) -> str:
         summary = re.sub(r"www\.[^\s]+", "", summary)
         summary = " ".join(summary.split())  # Normalize whitespace
         # Giới hạn độ dài
-        if len(summary) > 300:
-            summary = summary[:300] + "..."
+        if len(summary) > 240:
+            summary = summary[:240].rstrip() + "..."
     return summary
 
 
@@ -394,7 +425,7 @@ def summarize_section_with_gemini(
     ]
     compact_items = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
     prompt = f"""Tóm tắt từng tin trong section {section_title} bằng tiếng Việt.
-Mỗi tóm tắt 1-2 câu, tối đa 45 từ, chỉ dùng dữ kiện được cung cấp.
+Mỗi tóm tắt 1 câu, tối đa 35 từ, chỉ dùng dữ kiện được cung cấp.
 Chỉ trả về JSON hợp lệ dạng [{{"index":1,"summary":"..."}}], không Markdown.
 Dữ liệu: {compact_items}"""
 
@@ -402,7 +433,7 @@ Dữ liệu: {compact_items}"""
         prompt=prompt,
         api_key=api_key,
         temperature=0.2,
-        max_output_tokens=min(800, max(192, len(articles) * 80)),
+        max_output_tokens=min(640, max(192, len(articles) * 64)),
     )
     return _parse_section_summaries(text, len(articles)) if text else None
 
@@ -416,7 +447,7 @@ def format_article_caption(
 ) -> str:
     """Format caption cho một bài báo (ưu tiên AI summary nếu có, fallback về RSS summary)."""
     raw_title = article.title or "(Không có tiêu đề)"
-    body = ai_summary or article.summary or ""
+    body = _clip_text(ai_summary or article.summary or "", ARTICLE_SUMMARY_LIMIT)
     prefix = f"<b>{index}. "
     suffix = "</b>"
 
@@ -630,12 +661,13 @@ def fetch_articles_from_sources(
     *,
     limit: int,
     since: datetime | None = None,
+    require_image: bool = False,
 ) -> List[Article]:
     """Gom, sắp xếp và loại bài trùng từ nhiều nguồn RSS."""
     candidates: List[Article] = []
     successful_feeds = 0
     failures: List[str] = []
-    per_feed_limit = max(limit, 10)
+    per_feed_limit = max(limit * 3, 20) if require_image else max(limit, 10)
 
     for source, rss_url in feeds.items():
         try:
@@ -645,9 +677,12 @@ def fetch_articles_from_sources(
                 since=since,
                 source=source,
             )
+            if require_image:
+                articles = [article for article in articles if article.image_url]
             successful_feeds += 1
             candidates.extend(articles)
-            print(f"ℹ️ RSS {source}: {len(articles)} recent articles")
+            qualifier = " image" if require_image else " recent"
+            print(f"ℹ️ RSS {source}: {len(articles)}{qualifier} articles")
         except Exception as exc:
             failure = f"{source}: {type(exc).__name__}: {exc}"
             failures.append(failure)
@@ -761,6 +796,7 @@ def main() -> int:
                 INTERNATIONAL_RSS_FEEDS,
                 limit=international_news_count,
                 since=since_vn,
+                require_image=True,
             ),
         ),
         (
@@ -770,6 +806,7 @@ def main() -> int:
                 TECHNOLOGY_RSS_FEEDS,
                 limit=technology_news_count,
                 since=since_vn,
+                require_image=True,
             ),
         ),
     )

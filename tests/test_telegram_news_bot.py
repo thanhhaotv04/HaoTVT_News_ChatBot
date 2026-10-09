@@ -142,6 +142,72 @@ def test_fetch_articles_from_sources_merges_sorts_dedupes_and_labels(monkeypatch
     assert len({a.link for a in articles}) == 3
 
 
+def test_fetch_articles_from_sources_can_require_images(monkeypatch):
+    now = datetime(2026, 8, 9, 6, 0, tzinfo=bot.VN_TZ)
+    feeds = {"BBC": "https://rss.test/bbc", "Guardian": "https://rss.test/guardian"}
+    feed_articles = {
+        "https://rss.test/bbc": [
+            bot.Article("No image", "https://example.com/no-image", now),
+            bot.Article(
+                "BBC image",
+                "https://example.com/bbc",
+                now - timedelta(minutes=1),
+                image_url="https://example.com/bbc.jpg",
+            ),
+        ],
+        "https://rss.test/guardian": [
+            bot.Article(
+                "Guardian image",
+                "https://example.com/guardian",
+                now - timedelta(minutes=2),
+                image_url="https://example.com/guardian.jpg",
+            ),
+        ],
+    }
+
+    def fake_fetch(rss_url, limit=3, *, since=None, source=""):
+        return [
+            bot.Article(a.title, a.link, a.published_at, a.image_url, a.summary, source)
+            for a in feed_articles[rss_url][:limit]
+        ]
+
+    monkeypatch.setattr(bot, "fetch_articles_from_feed", fake_fetch)
+
+    articles = bot.fetch_articles_from_sources(feeds, limit=2, require_image=True)
+
+    assert [article.title for article in articles] == ["BBC image", "Guardian image"]
+    assert all(article.image_url for article in articles)
+
+
+def test_extract_image_supports_bbc_guardian_and_encoded_content():
+    guardian_entry = SimpleNamespace(
+        enclosures=[],
+        media_content=[
+            {"width": "140", "url": "https://example.com/140.jpg"},
+            {"width": "700", "url": "https://example.com/700.jpg"},
+        ],
+        media_thumbnail=[],
+        summary="",
+    )
+    bbc_entry = SimpleNamespace(
+        enclosures=[],
+        media_content=[],
+        media_thumbnail=[{"width": "240", "url": "https://example.com/bbc.jpg"}],
+        summary="",
+    )
+    encoded_entry = SimpleNamespace(
+        enclosures=[],
+        media_content=[],
+        media_thumbnail=[],
+        summary="",
+        content=[{"value": '<p><img src="https://example.com/encoded.jpg"></p>'}],
+    )
+
+    assert bot._extract_image_url(guardian_entry) == "https://example.com/700.jpg"
+    assert bot._extract_image_url(bbc_entry) == "https://example.com/bbc.jpg"
+    assert bot._extract_image_url(encoded_entry) == "https://example.com/encoded.jpg"
+
+
 def test_fetch_raw_uses_rss_request_headers(monkeypatch):
     response = FakeResponse()
     response.content = b"<rss><channel></channel></rss>"
@@ -192,10 +258,25 @@ def test_format_article_caption_keeps_valid_html_and_adds_source_link():
     assert "BBC &lt;World&gt;" in full_caption
 
 
+def test_format_article_caption_clips_verbose_ai_summary():
+    article = bot.Article("Title", "https://example.com/article", summary="RSS")
+
+    caption = bot.format_article_caption(article, 1, ai_summary="z" * 500)
+
+    assert "z" * 277 + "..." in caption
+    assert "z" * 281 not in caption
+
+
 def test_extract_summary_decodes_html_entities():
     entry = SimpleNamespace(summary="<p>A &amp; B</p>", description="")
 
     assert bot._extract_summary(entry) == "A & B"
+
+
+def test_extract_summary_is_short_for_telegram():
+    entry = SimpleNamespace(summary="word " * 100, description="")
+
+    assert len(bot._extract_summary(entry)) <= 243
 
 
 def test_send_article_falls_back_to_text_when_photo_fails(monkeypatch):
@@ -312,7 +393,7 @@ def test_summarize_section_batches_articles_and_parses_json(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["max_output_tokens"] == 192
     assert '"index":1' in calls[0]["prompt"]
-    assert "tối đa 45 từ" in calls[0]["prompt"]
+    assert "tối đa 35 từ" in calls[0]["prompt"]
 
 
 def test_parse_section_summaries_keeps_valid_items_for_rss_fallback():
@@ -377,6 +458,7 @@ def test_main_uses_actual_article_count_and_reports_partial_failure(monkeypatch,
 def test_main_sends_requested_three_sections(monkeypatch):
     messages = []
     sent_articles = []
+    image_requirements = []
 
     def make_articles(prefix, count, source):
         return [
@@ -401,6 +483,7 @@ def test_main_sends_requested_three_sections(monkeypatch):
     )
 
     def fetch_sources(feeds, **_kwargs):
+        image_requirements.append(_kwargs.get("require_image"))
         if feeds is bot.INTERNATIONAL_RSS_FEEDS:
             return make_articles("World", 5, "BBC World")
         return make_articles("Tech", 3, "BBC Technology")
@@ -420,6 +503,7 @@ def test_main_sends_requested_three_sections(monkeypatch):
         "<b>🌍 Tin quốc tế · 5 tin</b>",
         "<b>💻 Tin công nghệ · 3 tin</b>",
     ]
+    assert image_requirements == [True, True]
     assert [index for _, index in sent_articles] == [*range(1, 11), *range(1, 6), *range(1, 4)]
 
 
