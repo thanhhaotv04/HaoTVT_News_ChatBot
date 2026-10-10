@@ -1,41 +1,42 @@
-# HaoTVT News ChatBot
+# HaoTVT — Trợ lý tin tức trên Telegram
 
-Bot Python tong hop 10 tin Viet Nam, 5 tin quoc te va 3 tin cong nghe trong 24h gan nhat, tom tat bang Gemini neu co API key, roi gui qua Telegram luc 6:30 sang moi ngay bang GitHub Actions.
+**Nhận bản tin mỗi sáng ngay trên Telegram.** Dự án tự động tổng hợp tin Việt Nam, quốc tế và công nghệ, kèm tóm tắt ngắn, hình ảnh và liên kết đọc bài gốc.
 
-## Chuc nang
+## Nội dung bản tin
 
-- Loc tin theo khung thoi gian `ARTICLE_LOOKBACK_HOURS`, mac dinh 24h.
-- Gui ba muc rieng: `VIETNAM_NEWS_COUNT=10`, `INTERNATIONAL_NEWS_COUNT=5`, `TECHNOLOGY_NEWS_COUNT=3`.
-- Tin Viet Nam lay tu cac chuyen muc trong nuoc cua VNExpress; tin quoc te lay tu BBC World, The Guardian World va Al Jazeera.
-- Tin cong nghe lay tu BBC Technology, The Guardian Technology va TechCrunch.
-- Tin quoc te va cong nghe chi chon bai co anh RSS; ho tro `media:thumbnail`, `media:content`, enclosure va anh trong HTML.
-- Tu dong dedupe URL va uu tien bai co thoi gian dang moi nhat.
-- Moi bai hien thi ro nguon; mot nguon loi khong lam mat cac muc tin con lai.
-- Gui anh kem caption neu co anh RSS; neu anh loi thi fallback sang tin nhan text.
-- Escape HTML va cat noi dung theo gioi han Telegram de tranh loi `parse_mode=HTML`.
-- Moi tin co link `Doc bai goc`, ke ca khi RSS khong co anh.
-- Gemini tom tat ngan theo tung section (toi da 3 request thay vi 18), co fallback model va fallback RSS khi AI loi.
-- Che token/API key trong log loi va bao loi workflow neu gui thieu tin.
-- GitHub Actions chay test truoc khi gui tin.
+Theo cấu hình mặc định, bot chọn tin trong **24 giờ gần nhất** với số lượng tối đa cho mỗi nhóm:
 
-## Cau hinh
+| Nhóm tin | Số lượng | Nguồn tin |
+| --- | --- | --- |
+| Việt Nam | 10 tin | VnExpress |
+| Quốc tế | 5 tin | BBC, The Guardian, Al Jazeera |
+| Công nghệ | 3 tin | BBC, The Guardian, TechCrunch |
 
-Tao GitHub Secrets:
+Số tin thực tế phụ thuộc vào các bài mới có sẵn từ nguồn tin.
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `GEMINI_API_KEY` tuy chon
+## Chức năng chính
 
-Bien moi truong tuy chon:
+- **Tổng hợp tự động:** lọc bài theo thời gian, loại bỏ liên kết trùng lặp và ưu tiên tin mới.
+- **Đọc nhanh trên Telegram:** mỗi tin hiển thị tiêu đề, phần tóm tắt, nguồn và liên kết đọc đầy đủ.
+- **Gửi ảnh minh họa:** tin quốc tế và công nghệ chỉ chọn bài có ảnh; nếu gửi ảnh thất bại, bot chuyển sang gửi văn bản.
+- **Tóm tắt bằng Gemini:** khi có khóa truy cập, bot tạo tóm tắt ngắn bằng tiếng Việt. Khi không dùng được Gemini, bot dùng mô tả từ nguồn tin.
+- **Gửi bản tin mỗi sáng:** GitHub Actions được đặt lịch chính lúc **06:30 giờ Việt Nam**, có lượt dự phòng lúc 06:40 và 06:50 cùng cơ chế kiểm tra để hạn chế gửi lặp trong ngày.
 
-- `ARTICLE_LOOKBACK_HOURS=24`
-- `VIETNAM_NEWS_COUNT=10`
-- `INTERNATIONAL_NEWS_COUNT=5`
-- `TECHNOLOGY_NEWS_COUNT=3`
-- `RSS_INSECURE=1` chi dung khi moi truong local bi loi SSL proxy
-- `GEMINI_MODEL=gemini-3.5-flash-lite` de uu tien model tuy chon truoc danh sach fallback
+## Cấu hình để nhận tin
 
-## Chay local
+Trong phần cài đặt kho mã trên GitHub, lưu các giá trị sau dưới dạng thông tin bí mật cho GitHub Actions:
+
+| Tên cấu hình | Ý nghĩa |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Mã truy cập bot Telegram, lấy từ `@BotFather`. |
+| `TELEGRAM_CHAT_ID` | Mã cuộc trò chuyện hoặc nhóm nhận bản tin. |
+| `GEMINI_API_KEY` | Khóa truy cập Gemini để tóm tắt tin; không bắt buộc. |
+
+Bật GitHub Actions để chạy theo lịch. Bạn cũng có thể chạy thủ công khi muốn nhận bản tin ngay.
+
+## Chạy trên máy
+
+Dự án sử dụng Python. Tại thư mục dự án, chạy:
 
 ```bash
 python3 -m venv .venv
@@ -44,15 +45,12 @@ pip install -r requirements.txt
 python telegram_news_bot.py
 ```
 
-Neu chua cau hinh Telegram token/chat id, lenh tren se chi preview cac tin nong trong 24h gan nhat.
+Nếu chưa đặt `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID` trong biến môi trường, chương trình chỉ hiển thị bản tin xem trước trên màn hình. Khi đã đặt đủ hai giá trị, chương trình sẽ gửi tin qua Telegram.
 
-## Test
+Có thể điều chỉnh khoảng thời gian lấy tin bằng `ARTICLE_LOOKBACK_HOURS` và số lượng từng nhóm bằng `VIETNAM_NEWS_COUNT`, `INTERNATIONAL_NEWS_COUNT`, `TECHNOLOGY_NEWS_COUNT`. Khi chạy bằng GitHub Actions, sửa các giá trị tương ứng trong [tệp lịch gửi tin](.github/workflows/daily_news.yml).
+
+Để chạy bộ kiểm thử trong môi trường Python đã kích hoạt:
 
 ```bash
-. .venv/bin/activate
 pytest -q
 ```
-
-## Lich GitHub Actions
-
-Workflow uu tien chay luc `06:30` gio Viet Nam. Hai moc `06:40` va `06:50` la du phong neu GitHub bo mot scheduled run; delivery marker va concurrency dam bao bot chi gui mot lan moi ngay. Nut chay thu cong luon cho phep gui lai khi can.
